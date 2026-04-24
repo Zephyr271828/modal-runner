@@ -1,0 +1,18 @@
+[project]
+name = "modal-runner"
+version = "0.1.0"
+description = "Orchestrate shell-script training workloads on Modal: auto-resume, GPU gating, per-app logs."
+requires-python = ">=3.9"
+dependencies = [
+    "modal>=0.64",
+]
+
+[project.scripts]
+modal-runner = "modal_runner.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["modal_runner*"]
