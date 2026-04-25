@@ -237,9 +237,10 @@ def run(
     log_dir = pathlib.Path(log_root) / name
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Gate on GPU availability before doing any uploads (uploads are cheap but
-    # the queue wait should come first so we don't hold volume locks).
-    queue.wait_for_slot(num_gpus, max_modal_gpus)
+    # Claim a GPU slot under an exclusive flock so concurrent launches
+    # serialize through the cap check. The slot is held for the entire
+    # lifetime of this run (across retries) and released in `finally`.
+    slot = queue.acquire_slot(num_gpus, max_modal_gpus)
 
     # Stage the repo snapshot and push it to the volume under /repo.
     # Additionally exclude any SYNC_VARS path that lives inside the repo
@@ -362,3 +363,4 @@ def run(
         return 1
     finally:
         shutil.rmtree(snap, ignore_errors=True)
+        queue.release_slot(slot)

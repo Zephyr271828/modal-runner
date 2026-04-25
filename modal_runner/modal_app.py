@@ -48,23 +48,44 @@ if REQUIREMENTS:
     if not req_path.is_file():
         raise SystemExit(f"MR_REQUIREMENTS={REQUIREMENTS!r} is not a file")
 
-    # Detect local-file entries (e.g. ./flash_attn-...whl) and bake them
-    # into the image so pip can resolve them at build time. Lines are
-    # resolved relative to the requirements file's directory.
-    req_dir = req_path.parent
+    # Build a flat, self-contained requirements file:
+    #   - inline `-r other.txt` references (so the rewritten file stands
+    #     alone when Modal copies it into the build container);
+    #   - rewrite local-file entries (e.g. ./flash_attn-...whl) to in-image
+    #     paths after baking them via `add_local_file(copy=True)`.
     rewritten: list[str] = []
-    for raw in req_path.read_text().splitlines():
-        line = raw.strip()
-        if line and not line.startswith(("#", "-")):
-            cand = pathlib.Path(line) if os.path.isabs(line) else (req_dir / line)
-            if cand.is_file():
-                in_image = f"/wheels/{cand.name}"
-                _image = _image.add_local_file(
-                    str(cand.resolve()), in_image, copy=True
-                )
-                rewritten.append(in_image)
-                continue
-        rewritten.append(raw)
+
+    def _inline(path: pathlib.Path, _seen: set[pathlib.Path]) -> None:
+        path = path.resolve()
+        if path in _seen:
+            return  # avoid recursive cycles
+        _seen.add(path)
+        base = path.parent
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            # `-r foo.txt` / `--requirement foo.txt` -> inline the file.
+            if line.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+                _, _, ref = line.partition(" ")
+                ref = ref.strip()
+                ref_path = pathlib.Path(ref) if os.path.isabs(ref) else (base / ref)
+                if ref_path.is_file():
+                    rewritten.append(f"# === inlined: {ref_path} ===")
+                    _inline(ref_path, _seen)
+                    continue
+            # Detect local-file entries and bake into the image.
+            if line and not line.startswith(("#", "-")):
+                cand = pathlib.Path(line) if os.path.isabs(line) else (base / line)
+                if cand.is_file():
+                    in_image = f"/wheels/{cand.name}"
+                    global _image
+                    _image = _image.add_local_file(
+                        str(cand.resolve()), in_image, copy=True
+                    )
+                    rewritten.append(in_image)
+                    continue
+            rewritten.append(raw)
+
+    _inline(req_path, set())
 
     tmp = tempfile.NamedTemporaryFile(
         "w", suffix=".txt", prefix="mr-req-", delete=False
