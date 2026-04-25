@@ -13,10 +13,13 @@ The runner sets these before `modal run` so decorators pick them up at import:
                      entries (e.g. `./flash_attn-…whl`) are auto-baked into
                      the image via `add_local_file(copy=True)` and rewritten
                      to in-image paths so pip resolves them at build time.
-                     Editable (`-e`) entries that point into the uploaded
-                     repo still won't work — the repo isn't there yet at
-                     image-build time; use PYTHONPATH or a script-time
-                     `pip install -e ...` for those.
+    MR_EDITABLE      colon-separated list of local directories to install
+                     editable (`pip install -e`). Each is baked into the
+                     image at `/editable/<basename>` via `add_local_dir
+                     (copy=True)` and added to the same pip pass as the
+                     requirements file. Use this for repo-local packages
+                     (e.g. an in-tree fork of a library) so installation
+                     stays in image-build, separate from runtime.
     MR_VOLUME        persistent modal.Volume name (default: modal-runner-vol)
 """
 
@@ -38,11 +41,26 @@ TIMEOUT = int(os.environ.get("MR_TIMEOUT", "86400"))
 IMAGE = os.environ.get("MR_IMAGE", "nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04")
 PIP_INSTALL = os.environ.get("MR_PIP_INSTALL", "").split()
 REQUIREMENTS = os.environ.get("MR_REQUIREMENTS", "").strip()
+EDITABLE = [p for p in os.environ.get("MR_EDITABLE", "").split(":") if p.strip()]
 VOLUME_NAME = os.environ.get("MR_VOLUME", "modal-runner-vol")
 
 _image = modal.Image.from_registry(IMAGE, add_python="3.11").apt_install(
     "rsync", "git", "curl"
 )
+
+# Bake editable repo packages into the image so they install at build time.
+# Each entry is a local directory; we copy it under `/editable/<basename>`
+# and append `-e /editable/<basename>` to the rewritten requirements list
+# below so pip installs everything in one pass.
+_editable_in_image: list[str] = []
+for ed in EDITABLE:
+    ed_path = pathlib.Path(ed).resolve()
+    if not ed_path.is_dir():
+        raise SystemExit(f"MR_EDITABLE entry {ed!r} is not a directory")
+    in_image = f"/editable/{ed_path.name}"
+    _image = _image.add_local_dir(str(ed_path), in_image, copy=True)
+    _editable_in_image.append(in_image)
+
 if REQUIREMENTS:
     req_path = pathlib.Path(REQUIREMENTS)
     if not req_path.is_file():
@@ -87,10 +105,24 @@ if REQUIREMENTS:
 
     _inline(req_path, set())
 
+    # Append editable-package installs so they go through the same pip
+    # invocation (resolves alongside the PyPI deps).
+    for ed_in_image in _editable_in_image:
+        rewritten.append(f"-e {ed_in_image}")
+
     tmp = tempfile.NamedTemporaryFile(
         "w", suffix=".txt", prefix="mr-req-", delete=False
     )
     tmp.write("\n".join(rewritten) + "\n")
+    tmp.close()
+    _image = _image.pip_install_from_requirements(tmp.name)
+elif _editable_in_image:
+    # No requirements file but we have editable packages. Synthesize a
+    # one-line requirements file so pip handles the `-e` flag uniformly.
+    tmp = tempfile.NamedTemporaryFile(
+        "w", suffix=".txt", prefix="mr-req-", delete=False
+    )
+    tmp.write("\n".join(f"-e {p}" for p in _editable_in_image) + "\n")
     tmp.close()
     _image = _image.pip_install_from_requirements(tmp.name)
 if PIP_INSTALL:

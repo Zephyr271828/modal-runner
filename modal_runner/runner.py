@@ -301,6 +301,7 @@ def run(
                 "MR_IMAGE": image,
                 "MR_PIP_INSTALL": pip_install,
                 "MR_REQUIREMENTS": os.environ.get("MR_REQUIREMENTS", ""),
+                "MR_EDITABLE": os.environ.get("MR_EDITABLE", ""),
                 "MR_VOLUME": volume,
             }
 
