@@ -16,7 +16,7 @@
 #   • auto-resume on FunctionTimeoutError / NCCL watchdog / control-plane errors
 #   • per-app logs at logs/<name>/<timestamp>.log
 #
-# Launch with:   bash examples/launch_train_modal_mr.sh
+# Launch with:   bash scripts/launch_train_modal_mr.sh
 #
 # Prereqs:
 #   pip install -e /mnt/weka/home/yucheng/yufeng/modal-runner
@@ -42,24 +42,68 @@ MR_PIP_INSTALL="${MR_PIP_INSTALL:-}"
 # Path to a requirements file used by modal-runner to build the image.
 # Picked up by modal_app.py via the MR_REQUIREMENTS env var.
 export MR_REQUIREMENTS="${MR_REQUIREMENTS:-${REPO_ROOT}/requirements_modal.txt}"
+# Repo-local packages installed editable into the image (colon-separated).
+export MR_EDITABLE="${MR_EDITABLE:-${REPO_ROOT}/src/training/sdar/llama_factory_sdar}"
 
 # Paths the user script wants preserved end-to-end.
 DATA_PATH_COMMON="${REPO_ROOT}/src/training/sdar/tokenized_cache/${DATASET}/seq_${SEQ_LEN}"
-OUTPUT_PATH_COMMON="${REPO_ROOT}/checkpoints"
 
 mr() {
   # One dispatch helper. Positional arg = app name. The rest of the line is
   # read as `VAR=VAL VAR=VAL ...` shell assignments exactly like a normal
   # inline-env invocation of the training script.
   local app_name="$1"; shift
+  # MODEL_NAME is required so we can compute the per-run output_dir.
+  local model_name=""
+  for kv in "$@"; do
+    if [[ "$kv" == MODEL_NAME=* ]]; then model_name="${kv#MODEL_NAME=}"; break; fi
+  done
+  if [[ -z "$model_name" ]]; then
+    echo "[mr] error: MODEL_NAME=... must be set in the inline env for ${app_name}" >&2
+    return 1
+  fi
+
+  # Dry-run train_sdar_mtp.sh in COMPUTE_OUTPUT_DIR_FILE mode to resolve the
+  # full output_dir for this exact config. Modal-runner then uploads / pulls
+  # back / mirrors only that subtree, instead of the entire `checkpoints/<MODEL_NAME>`
+  # parent (which can contain many sibling runs from other hyperparams).
+  local out_dir_file
+  out_dir_file="$(mktemp -t mr-out-dir-XXXXXX.txt)"
+  local out_path
+  if ! env \
+        DATASET="${DATASET}" \
+        dataset="${DATASET}" \
+        SEQ_LEN="${SEQ_LEN}" \
+        NUM_GPUS="${NUM_GPUS}" \
+        "$@" \
+        OUTPUT_PATH="${REPO_ROOT}/checkpoints/${model_name}" \
+        CUDA_VISIBLE_DEVICES=0 \
+        COMPUTE_OUTPUT_DIR_FILE="${out_dir_file}" \
+        bash "${REPO_ROOT}/scripts/train_sdar_mtp.sh" >/dev/null 2>&1
+  then
+    echo "[mr] error: dry-run to resolve output_dir failed for ${app_name}" >&2
+    rm -f "${out_dir_file}"
+    return 1
+  fi
+  out_path="$(cat "${out_dir_file}")"
+  rm -f "${out_dir_file}"
+  if [[ -z "${out_path}" ]]; then
+    echo "[mr] error: dry-run produced empty output_dir for ${app_name}" >&2
+    return 1
+  fi
+  echo "[mr] resolved OUTPUT_PATH=${out_path}"
+
   # shellcheck disable=SC2068  # intentional: forward caller's inline-env tokens
   env \
     DATA_PATH="${DATA_PATH_COMMON}" \
-    OUTPUT_PATH="${OUTPUT_PATH_COMMON}" \
+    OUTPUT_PATH="${out_path}" \
+    EXPLICIT_OUTPUT_DIR="${out_path}" \
     DATASET="${DATASET}" \
+    dataset="${DATASET}" \
     SEQ_LEN="${SEQ_LEN}" \
+    NUM_GPUS="${NUM_GPUS}" \
     $@ \
-    modal-runner run "${REPO_ROOT}/examples/train_sdar_mtp.sh" \
+    modal-runner run "${REPO_ROOT}/scripts/train_sdar_mtp.sh" \
       --name "${app_name}" \
       --num-gpus "${NUM_GPUS}" \
       --gpu-type "${GPU_TYPE}" \
@@ -82,66 +126,66 @@ mkdir -p "${REPO_ROOT}/logs"
 
 # Shared hyperparam defaults. Individual entries override LOSS_TYPE / REVEAL_MODE
 # / mtp_steps as needed; everything else stays the same.
-_DEFAULTS="LR=1e-3 GT_TOPK=1 INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true mtp_init_std=0.2"
+_DEFAULTS="LR=1e-3 gt_topk=1 input_prep_mode=bd_packed freeze_backbone=True freeze_lm_head=True mtp_init_std=0.2 micro_bs=2"
 
 # ── Priority 1: 1.7b / 4b / 8b, 3lyr, K=2 ───────────────────────────────────
 mr sdar-1_7b-3lyr-K2 \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt mtp_steps=2 ${_DEFAULTS}
 
 mr sdar-4b-3lyr-K2 \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-4B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-4b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt mtp_steps=2 ${_DEFAULTS}
 
 mr sdar-8b-3lyr-K2 \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt mtp_steps=2 ${_DEFAULTS}
 
 # ── Priority 2: 8b 3lyr-2h (multihead) ──────────────────────────────────────
 mr sdar-8b-3lyr-2h \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr-2h" \
    MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr-2h \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt_multihead ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt_multihead ${_DEFAULTS}
 
 # ── Priority 3: 1.7b / 4b / 8b, 3lyr, kd_diff loss ──────────────────────────
 mr sdar-1_7b-3lyr-kd_diff \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
+   loss_type=kd_diff reveal_mode=gt ${_DEFAULTS}
 
 mr sdar-4b-3lyr-kd_diff \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-4B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-4b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
+   loss_type=kd_diff reveal_mode=gt ${_DEFAULTS}
 
 mr sdar-8b-3lyr-kd_diff \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
+   loss_type=kd_diff reveal_mode=gt ${_DEFAULTS}
 
 # ── Priority 4: 1.7b num_layers ablation (1 / 2 / 4 / 8) ────────────────────
 # mr sdar-1_7b-1lyr \
 #    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-1lyr" \
 #    MODEL_NAME=mtp_sdar-1_7b-chat-b16-1lyr \
-#    LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+#    loss_type=kd_diff_sum reveal_mode=gt ${_DEFAULTS}
 
 mr sdar-1_7b-2lyr \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-2lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-2lyr \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt ${_DEFAULTS}
 
 mr sdar-1_7b-4lyr \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-4lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-4lyr \
-   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+   loss_type=kd_diff_sum reveal_mode=gt ${_DEFAULTS}
 
 # mr sdar-1_7b-8lyr \
 #    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-8lyr" \
 #    MODEL_NAME=mtp_sdar-1_7b-chat-b16-8lyr \
-#    LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+#    loss_type=kd_diff_sum reveal_mode=gt ${_DEFAULTS}
 
 echo "[launch] all jobs dispatched (running in background)"
 echo "[launch] monitor:  modal-runner jobs"

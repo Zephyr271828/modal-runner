@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ RETRY_PATTERNS = {
         r"|Connection reset by peer"
         r"|TimeoutError: Deadline exceeded"
     ),
+    "silence_timeout": re.compile(r"\[modal-runner\] no log output for \d+s"),
 }
 
 # Env vars the user script declares; these are made visible on the Modal
@@ -48,6 +50,11 @@ RETRY_PATTERNS = {
 SYNC_VARS = ("DATA_PATH", "MODEL_PATH", "OUTPUT_PATH")
 UPLOAD_VARS = ("DATA_PATH", "MODEL_PATH", "OUTPUT_PATH")
 OUTPUT_PULL_INTERVAL_S = int(os.environ.get("MR_OUTPUT_PULL_INTERVAL_S", "300"))
+# Kill `modal run` if no log output for this many seconds. The Modal stream
+# can hang silently after a container dies (Tasks=0) — without this watchdog
+# the wrapper sits until Modal's 24h function timeout fires. Set to 0 to
+# disable.
+SILENCE_TIMEOUT_S = int(os.environ.get("MR_SILENCE_TIMEOUT_S", "600"))
 
 # Host-system env vars that would break the container if forwarded. Everything
 # else in the caller's environment IS forwarded, so users can pass arbitrary
@@ -83,6 +90,30 @@ def _collect_user_env() -> dict[str, str]:
     return out
 
 MODAL_APP_PATH = str(pathlib.Path(__file__).resolve().parent / "modal_app.py")
+
+
+def _modal_app_tasks(app_name: str) -> Optional[int]:
+    """Return the running-task count for the most recent Modal app whose
+    description matches ``app_name``. Returns None if the lookup fails or no
+    matching app exists yet (e.g. still in image build / queue)."""
+    try:
+        out = subprocess.run(
+            ["modal", "app", "list", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode != 0:
+            return None
+        apps = json.loads(out.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return None
+    # Apps with the same description are listed newest-first by Modal.
+    for a in apps:
+        if a.get("Description", "").startswith(app_name) and a.get("Stopped at") in (None, ""):
+            try:
+                return int(a.get("Tasks", "0"))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def classify_failure(log_path: pathlib.Path) -> Optional[str]:
@@ -431,10 +462,61 @@ def run(
                         stderr=subprocess.STDOUT,
                     )
                     assert proc.stdout is not None
-                    for chunk in iter(lambda: proc.stdout.read(4096), b""):
-                        sys.stdout.buffer.write(chunk)
-                        sys.stdout.buffer.flush()
-                        logf.write(chunk)
+                    fd = proc.stdout.fileno()
+                    last_data = time.monotonic()
+                    while True:
+                        ready, _, _ = select.select([fd], [], [], 30.0)
+                        if ready:
+                            chunk = os.read(fd, 65536)
+                            if not chunk:
+                                break  # EOF
+                            last_data = time.monotonic()
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.buffer.flush()
+                            logf.write(chunk)
+                            logf.flush()
+                        else:
+                            if proc.poll() is not None:
+                                break
+                            silent_for = time.monotonic() - last_data
+                            if SILENCE_TIMEOUT_S > 0 and silent_for > SILENCE_TIMEOUT_S:
+                                # Only kill if the app is actually running
+                                # (Tasks >= 1). During image build / GPU queue
+                                # the log can be silent for many minutes — that
+                                # is not a hang, so we wait it out.
+                                tasks = _modal_app_tasks(app_name)
+                                if tasks is None or tasks < 1:
+                                    note = (
+                                        f"[modal-runner] silent for {int(silent_for)}s but "
+                                        f"app not in running state (tasks={tasks}); "
+                                        f"watchdog deferred\n"
+                                    ).encode()
+                                    sys.stdout.buffer.write(note)
+                                    sys.stdout.buffer.flush()
+                                    logf.write(note)
+                                    logf.flush()
+                                    last_data = time.monotonic()
+                                    continue
+                                msg = (
+                                    f"[modal-runner] no log output for {int(silent_for)}s "
+                                    f"(threshold {SILENCE_TIMEOUT_S}s, tasks={tasks}) — "
+                                    f"killing modal run and stopping app {app_name}\n"
+                                ).encode()
+                                sys.stdout.buffer.write(msg)
+                                sys.stdout.buffer.flush()
+                                logf.write(msg)
+                                logf.flush()
+                                subprocess.run(
+                                    ["modal", "app", "stop", app_name],
+                                    check=False,
+                                    capture_output=True,
+                                )
+                                proc.terminate()
+                                try:
+                                    proc.wait(timeout=30)
+                                except subprocess.TimeoutExpired:
+                                    proc.kill()
+                                break
                     rc = proc.wait()
             finally:
                 if poller_stop is not None:
