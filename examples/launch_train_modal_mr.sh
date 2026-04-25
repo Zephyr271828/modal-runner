@@ -33,9 +33,9 @@ cd "${REPO_ROOT}"
 # ── Shared modal-runner flags (apply to every entry) ────────────────────────
 DATASET="${DATASET:-sftdatasetv3}"
 SEQ_LEN="${SEQ_LEN:-4096}"
-GPU_TYPE="${GPU_TYPE:-H100}"
+GPU_TYPE="${GPU_TYPE:-B200}"
 NUM_GPUS="${NUM_GPUS:-8}"
-MAX_MODAL_GPUS="${MAX_MODAL_GPUS:-64}"
+MAX_MODAL_GPUS="${MAX_MODAL_GPUS:-50}"
 MAX_RETRIES="${MAX_RETRIES:-5}"
 MR_IMAGE="${MR_IMAGE:-pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime}"
 MR_PIP_INSTALL="${MR_PIP_INSTALL:-transformers accelerate deepspeed wandb datasets peft sentencepiece}"
@@ -71,56 +71,75 @@ mr() {
 mkdir -p "${REPO_ROOT}/logs"
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  ENTRIES — one line per job. Pass whatever env train_sdar_mtp.sh reads.  ║
+# ║  ENTRIES — ordered by priority. Dispatch is sequential (modal-runner     ║
+# ║  detaches each), but the Modal GPU-budget queue enforces the order: the  ║
+# ║  second/third batches block on `wait_for_slot` until earlier ones finish ║
+# ║  (or free enough GPUs).                                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
-# [C] kd_diff ablation at 1.7b / 4b / 8b, 3lyr
-mr sdar-1_7b-3lyr-kd_diff  \
-  MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-3lyr" \
-  MODEL_NAME=mtp_sdar-1_7b-chat-b16-3lyr \
-  LOSS_TYPE=kd_diff \
-  LR=1e-3 \
-  REVEAL_MODE=gt \
-  GT_TOPK=1 \
-  INPUT_PREP_MODE=bd_packed \
-  FREEZE_BACKBONE=true \
-  FREEZE_LM_HEAD=true \
-  mtp_init_std=0.2
+# Shared hyperparam defaults. Individual entries override LOSS_TYPE / REVEAL_MODE
+# / mtp_steps as needed; everything else stays the same.
+_DEFAULTS="LR=1e-3 GT_TOPK=1 INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true mtp_init_std=0.2"
+
+# ── Priority 1: 1.7b / 4b / 8b, 3lyr, K=2 ───────────────────────────────────
+mr sdar-1_7b-3lyr-K2 \
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-3lyr" \
+   MODEL_NAME=mtp_sdar-1_7b-chat-b16-3lyr \
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+
+mr sdar-4b-3lyr-K2 \
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-4B-Chat-b16-MTP-3lyr" \
+   MODEL_NAME=mtp_sdar-4b-chat-b16-3lyr \
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+
+mr sdar-8b-3lyr-K2 \
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr" \
+   MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr \
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt mtp_steps=2 ${_DEFAULTS}
+
+# ── Priority 2: 8b 3lyr-2h (multihead) ──────────────────────────────────────
+mr sdar-8b-3lyr-2h \
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr-2h" \
+   MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr-2h \
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt_multihead ${_DEFAULTS}
+
+# ── Priority 3: 1.7b / 4b / 8b, 3lyr, kd_diff loss ──────────────────────────
+mr sdar-1_7b-3lyr-kd_diff \
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-3lyr" \
+   MODEL_NAME=mtp_sdar-1_7b-chat-b16-3lyr \
+   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
 
 mr sdar-4b-3lyr-kd_diff \
-  MODEL_PATH="${REPO_ROOT}/src/models/SDAR-4B-Chat-b16-MTP-3lyr" \
-  MODEL_NAME=mtp_sdar-4b-chat-b16-3lyr \
-  LOSS_TYPE=kd_diff \
-  LR=1e-3 \
-  REVEAL_MODE=gt \
-  GT_TOPK=1 \
-  INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true \
-  mtp_init_std=0.2
+   MODEL_PATH="${REPO_ROOT}/src/models/SDAR-4B-Chat-b16-MTP-3lyr" \
+   MODEL_NAME=mtp_sdar-4b-chat-b16-3lyr \
+   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
 
 mr sdar-8b-3lyr-kd_diff \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-8B-Chat-b16-MTP-3lyr" \
    MODEL_NAME=mtp_sdar-8b-chat-b16-3lyr \
-   LOSS_TYPE=kd_diff \
-   LR=1e-3 \
-   REVEAL_MODE=gt \
-   GT_TOPK=1 \
-   INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true \
-   mtp_init_std=0.2
+   LOSS_TYPE=kd_diff REVEAL_MODE=gt ${_DEFAULTS}
 
-# [F] K=1 reveal_gt_1 at 2lyr / 4lyr
-mr sdar-1_7b-2lyr-kd_diff_sum \
+# ── Priority 4: 1.7b num_layers ablation (1 / 2 / 4 / 8) ────────────────────
+# mr sdar-1_7b-1lyr \
+#    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-1lyr" \
+#    MODEL_NAME=mtp_sdar-1_7b-chat-b16-1lyr \
+#    LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+
+mr sdar-1_7b-2lyr \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-2lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-2lyr \
-   LOSS_TYPE=kd_diff_sum LR=1e-3 \
-   REVEAL_MODE=gt GT_TOPK=1 \
-   INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true \
-   mtp_init_std=0.2
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
 
-mr sdar-1_7b-4lyr-kd_diff_sum \
+mr sdar-1_7b-4lyr \
    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-4lyr" \
    MODEL_NAME=mtp_sdar-1_7b-chat-b16-4lyr \
-   LOSS_TYPE=kd_diff_sum \
-   LR=1e-3 \
-   REVEAL_MODE=gt GT_TOPK=1 \
-   INPUT_PREP_MODE=bd_packed FREEZE_BACKBONE=true FREEZE_LM_HEAD=true \
-   mtp_init_std=0.2
+   LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+
+# mr sdar-1_7b-8lyr \
+#    MODEL_PATH="${REPO_ROOT}/src/models/SDAR-1_7B-Chat-b16-MTP-8lyr" \
+#    MODEL_NAME=mtp_sdar-1_7b-chat-b16-8lyr \
+#    LOSS_TYPE=kd_diff_sum REVEAL_MODE=gt ${_DEFAULTS}
+
+echo "[launch] all jobs dispatched (running in background)"
+echo "[launch] monitor:  modal-runner jobs"
+echo "[launch] logs:     tail -f logs/<app_name>/*.log"

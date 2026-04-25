@@ -32,9 +32,19 @@ RETRY_PATTERNS = {
     ),
 }
 
-# Env vars the user script declares; these are uploaded to / pulled from the
-# Modal volume so the script sees identical paths on both ends.
+# Env vars the user script declares; these are made visible on the Modal
+# volume so the script sees identical paths on both ends.
+#
+#  - UPLOAD_VARS  : pushed local -> volume (read-only inputs).
+#  - OUTPUT_PATH  : never uploaded from local. Modal owns this dir during the
+#                   run; we only pull it back at the end (and between retries
+#                   so resumed containers can pick up the latest checkpoint).
+#                   Uploading it from the local side would push the entire
+#                   shared `checkpoints/` tree (often hundreds of GB to TBs)
+#                   on every launch, which both blows up Modal storage and
+#                   takes hours.
 SYNC_VARS = ("DATA_PATH", "MODEL_PATH", "OUTPUT_PATH")
+UPLOAD_VARS = ("DATA_PATH", "MODEL_PATH")
 
 # Host-system env vars that would break the container if forwarded. Everything
 # else in the caller's environment IS forwarded, so users can pass arbitrary
@@ -94,6 +104,19 @@ def _vol_rel(host_path: str) -> str:
     return f"mounts/{base}_{h}"
 
 
+def _ensure_volume(volume: str) -> None:
+    """Create the Modal volume if it doesn't already exist (idempotent)."""
+    r = subprocess.run(
+        ["modal", "volume", "create", volume],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0 and "already exists" not in (r.stdout + r.stderr):
+        # Not a benign already-exists error; surface it.
+        sys.stderr.write(r.stdout + r.stderr)
+        raise SystemExit(f"failed to create modal volume {volume}")
+
+
 def _volume_put(volume: str, src: str, dst_rel: str) -> None:
     """Upload src directory into volume at dst_rel (idempotent)."""
     if not pathlib.Path(src).exists():
@@ -103,6 +126,20 @@ def _volume_put(volume: str, src: str, dst_rel: str) -> None:
         ["modal", "volume", "put", "--force", volume, src, f"/{dst_rel}"],
         check=True,
     )
+
+
+def _volume_path_exists(volume: str, dst_rel: str) -> bool:
+    """Return True if dst_rel exists (and is non-empty) on the Modal volume."""
+    r = subprocess.run(
+        ["modal", "volume", "ls", volume, f"/{dst_rel}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return False
+    # `modal volume ls` prints a table with at least a header even when empty;
+    # treat any non-error response as "path exists".
+    return bool(r.stdout.strip())
 
 
 def _volume_get(volume: str, src_rel: str, dst: str) -> None:
@@ -115,16 +152,48 @@ def _volume_get(volume: str, src_rel: str, dst: str) -> None:
         print(f"[modal-runner] warn: download rc={rc} (path may not yet exist)")
 
 
-def _snapshot_repo(repo_dir: pathlib.Path) -> pathlib.Path:
-    """Rsync the repo to a tempdir so mid-run edits don't break Modal uploads."""
-    snap = pathlib.Path(tempfile.mkdtemp(prefix="modal-runner-repo-"))
+DEFAULT_SNAPSHOT_EXCLUDES = [
+    "__pycache__", "*.pyc", "*.pyo", "*.so", "*.o",
+    ".git", ".venv", "venv", "node_modules",
+    "build/", "dist/", "*.egg-info",
+    # Training/data dirs that must never end up in the code snapshot (they
+    # are handled separately via DATA_PATH / MODEL_PATH / OUTPUT_PATH).
+    "checkpoints/", "checkpoint-*/", "wandb/",
+    "outputs/", "output/", "runs/", "tb_logs/", "tensorboard/",
+    "tokenized_cache/", "precomputed_states/", "cache/", ".cache/",
+    # Heavy weight/archive files anywhere in the tree.
+    "*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt",
+    "*.tar", "*.tar.gz", "*.zip", "*.gz", "*.parquet", "*.arrow",
+]
+
+
+def _snapshot_root() -> pathlib.Path:
+    """Where to stage repo snapshots. Default: ~/.cache/modal-runner/snapshots.
+
+    `/tmp` is often on the root FS, which is tiny on shared-storage clusters.
+    The user can override via MR_SNAPSHOT_ROOT if they have a faster local FS.
+    """
+    root = os.environ.get("MR_SNAPSHOT_ROOT") or os.path.expanduser(
+        "~/.cache/modal-runner/snapshots"
+    )
+    p = pathlib.Path(root)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _snapshot_repo(repo_dir: pathlib.Path, extra_excludes: list[str]) -> pathlib.Path:
+    """Rsync the repo to a tempdir so mid-run edits don't break Modal uploads.
+
+    The default exclude list keeps weights, checkpoints, datasets, and caches
+    out of the snapshot — those are uploaded separately through the Modal
+    volume via DATA_PATH / MODEL_PATH / OUTPUT_PATH.
+    """
+    snap = pathlib.Path(tempfile.mkdtemp(prefix="modal-runner-repo-", dir=_snapshot_root()))
+    excludes: list[str] = []
+    for pat in DEFAULT_SNAPSHOT_EXCLUDES + extra_excludes:
+        excludes += ["--exclude", pat]
     subprocess.run(
-        [
-            "rsync", "-a",
-            "--exclude=__pycache__", "--exclude=*.pyc",
-            "--exclude=.git", "--exclude=build/", "--exclude=dist/",
-            f"{repo_dir}/", f"{snap}/",
-        ],
+        ["rsync", "-a", *excludes, f"{repo_dir}/", f"{snap}/"],
         check=True,
     )
     return snap
@@ -173,16 +242,43 @@ def run(
     queue.wait_for_slot(num_gpus, max_modal_gpus)
 
     # Stage the repo snapshot and push it to the volume under /repo.
-    snap = _snapshot_repo(repo_root)
+    # Additionally exclude any SYNC_VARS path that lives inside the repo
+    # (e.g. OUTPUT_PATH=<repo>/checkpoints) — those are uploaded separately
+    # through the Modal volume and would otherwise fill /tmp.
+    extra_excludes: list[str] = []
+    for var in SYNC_VARS:
+        val = os.environ.get(var)
+        if not val:
+            continue
+        try:
+            rel = pathlib.Path(val).resolve().relative_to(repo_root)
+            extra_excludes.append(f"/{rel}/")
+        except ValueError:
+            pass
+    snap = _snapshot_repo(repo_root, extra_excludes)
     try:
+        _ensure_volume(volume)
         _volume_put(volume, str(snap), "repo")
 
-        # Upload DATA_PATH / MODEL_PATH once; OUTPUT_PATH also on first try if
-        # it already has prior-run checkpoints locally.
-        for var in SYNC_VARS:
+        # DATA_PATH / MODEL_PATH are uploaded only the first time (when the
+        # volume path doesn't yet exist). Re-uploading on every launch is
+        # slow. Set MR_FORCE_UPLOAD=1 to override.
+        #
+        # OUTPUT_PATH is intentionally NOT uploaded — see SYNC_VARS comment.
+        force_upload = os.environ.get("MR_FORCE_UPLOAD") == "1"
+        for var in UPLOAD_VARS:
             val = os.environ.get(var)
-            if val and pathlib.Path(val).exists():
-                _volume_put(volume, val, _vol_rel(val))
+            if not (val and pathlib.Path(val).exists()):
+                continue
+            dst_rel = _vol_rel(val)
+            if not force_upload and _volume_path_exists(volume, dst_rel):
+                print(
+                    f"[modal-runner] skipping {var} upload — {volume}:/{dst_rel} already present "
+                    f"(set MR_FORCE_UPLOAD=1 to override)",
+                    flush=True,
+                )
+            else:
+                _volume_put(volume, val, dst_rel)
 
         env_for_script = user_env
 
@@ -243,10 +339,10 @@ def run(
                     f"[modal-runner] classified failure: {cause} — resuming (attempt {attempt + 1}/{max_retries + 1})",
                     flush=True,
                 )
-                # Push refreshed OUTPUT_PATH (it may have new checkpoints we
-                # just pulled) back to volume so resumed container sees it.
-                if out_path and pathlib.Path(out_path).exists():
-                    _volume_put(volume, out_path, _vol_rel(out_path))
+                # OUTPUT_PATH is NOT pushed back — the Modal volume retains it
+                # across retries, so the resumed container already sees the
+                # latest checkpoints. Pushing the local copy back would re-
+                # upload the whole checkpoints tree on every retry.
                 # Small backoff to let Modal-side state settle.
                 time.sleep(15)
                 continue
