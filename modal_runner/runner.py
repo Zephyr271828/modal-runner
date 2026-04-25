@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -35,16 +36,18 @@ RETRY_PATTERNS = {
 # Env vars the user script declares; these are made visible on the Modal
 # volume so the script sees identical paths on both ends.
 #
-#  - UPLOAD_VARS  : pushed local -> volume (read-only inputs).
-#  - OUTPUT_PATH  : never uploaded from local. Modal owns this dir during the
-#                   run; we only pull it back at the end (and between retries
-#                   so resumed containers can pick up the latest checkpoint).
-#                   Uploading it from the local side would push the entire
-#                   shared `checkpoints/` tree (often hundreds of GB to TBs)
-#                   on every launch, which both blows up Modal storage and
-#                   takes hours.
+#  - UPLOAD_VARS  : pushed local -> volume on launch.
+#  - OUTPUT_PATH  : same — uploaded if a local copy exists (so Modal can resume
+#                   from a prior local checkpoint). The caller is expected to
+#                   make OUTPUT_PATH point to a per-run subdirectory (e.g.
+#                   `checkpoints/<run_name>`) rather than a shared root, so
+#                   this upload stays bounded to one run's tree.
+#  - The pull-back from OUTPUT_PATH runs (a) periodically during the modal
+#    run via `_start_output_poller` so intermediate checkpoints stream back,
+#    and (b) once after the modal run exits.
 SYNC_VARS = ("DATA_PATH", "MODEL_PATH", "OUTPUT_PATH")
-UPLOAD_VARS = ("DATA_PATH", "MODEL_PATH")
+UPLOAD_VARS = ("DATA_PATH", "MODEL_PATH", "OUTPUT_PATH")
+OUTPUT_PULL_INTERVAL_S = int(os.environ.get("MR_OUTPUT_PULL_INTERVAL_S", "300"))
 
 # Host-system env vars that would break the container if forwarded. Everything
 # else in the caller's environment IS forwarded, so users can pass arbitrary
@@ -142,14 +145,110 @@ def _volume_path_exists(volume: str, dst_rel: str) -> bool:
     return bool(r.stdout.strip())
 
 
-def _volume_get(volume: str, src_rel: str, dst: str) -> None:
+def _volume_get(volume: str, src_rel: str, dst: str, quiet: bool = False) -> None:
     pathlib.Path(dst).mkdir(parents=True, exist_ok=True)
-    print(f"[modal-runner] downloading {volume}:/{src_rel} -> {dst}", flush=True)
+    if not quiet:
+        print(f"[modal-runner] downloading {volume}:/{src_rel} -> {dst}", flush=True)
     rc = subprocess.run(
         ["modal", "volume", "get", "--force", volume, f"/{src_rel}", dst],
+        capture_output=quiet,
     ).returncode
-    if rc != 0:
+    if rc != 0 and not quiet:
         print(f"[modal-runner] warn: download rc={rc} (path may not yet exist)")
+
+
+def _incremental_volume_sync(volume_name: str, vol_rel: str, dst: str) -> None:
+    """Mirror `volume_name:/vol_rel` into local `dst`, downloading only files
+    that are missing locally or whose size differs. Returns silently if the
+    volume slot doesn't yet exist (first poll ticks of a fresh run).
+
+    Local-side files that no longer exist on the volume are NOT removed —
+    keeping deletions one-way avoids accidental data loss on transient
+    listing errors. The trainer's `save_total_limit` rotation thus keeps
+    the volume slim while local accumulates; clean up manually if needed.
+    """
+    try:
+        import modal as _m
+        vol = _m.Volume.from_name(volume_name)
+        remote_files: dict[str, int] = {}
+        for e in vol.iterdir(f"/{vol_rel}", recursive=True):
+            if "FILE" in str(getattr(e, "type", "")).upper():
+                rel = str(pathlib.Path(e.path).relative_to(f"/{vol_rel}"))
+                remote_files[rel] = int(getattr(e, "size", 0) or 0)
+    except Exception:
+        return  # slot missing or transient API error — try again next tick
+
+    local_root = pathlib.Path(dst)
+    local_root.mkdir(parents=True, exist_ok=True)
+    local_files: dict[str, int] = {}
+    for f in local_root.rglob("*"):
+        if f.is_file():
+            local_files[str(f.relative_to(local_root))] = f.stat().st_size
+
+    missing = [p for p, sz in remote_files.items() if local_files.get(p) != sz]
+    if missing:
+        total_bytes = sum(remote_files[p] for p in missing)
+        print(
+            f"[modal-runner] poller: fetching {len(missing)} file(s) "
+            f"({total_bytes / 1e9:.2f} GB) <- {volume_name}:/{vol_rel}",
+            flush=True,
+        )
+        for rel in missing:
+            full_local = local_root / rel
+            full_local.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(full_local, "wb") as wf:
+                    for chunk in vol.read_file(f"/{vol_rel}/{rel}"):
+                        wf.write(chunk)
+            except Exception as ex:
+                print(f"[modal-runner] poller: skip {rel}: {ex}", flush=True)
+
+    # Bounded prune: mirror the trainer's save_total_limit rotation by
+    # removing local `checkpoint-N/` dirs that no longer exist on the
+    # volume. Scoped to dirs matching `checkpoint-<int>` so we never
+    # delete state files (trainer_state.json, wandb logs, etc.) that the
+    # trainer doesn't rotate. Skipped if the remote listing was empty,
+    # which we treat as "couldn't see remote" rather than "remote is
+    # genuinely empty" — otherwise a single API hiccup could nuke local.
+    if remote_files:
+        ckpt_re = re.compile(r"(.*?checkpoint-\d+)(?:/|$)")
+        def _ckpt_roots(paths):
+            roots = set()
+            for p in paths:
+                m = ckpt_re.match(p)
+                if m:
+                    roots.add(m.group(1))
+            return roots
+        stale = _ckpt_roots(local_files) - _ckpt_roots(remote_files)
+        for rel in stale:
+            full = local_root / rel
+            if full.is_dir():
+                shutil.rmtree(full, ignore_errors=True)
+                print(
+                    f"[modal-runner] poller: pruned stale {rel} (rotated off volume)",
+                    flush=True,
+                )
+
+
+def _start_output_poller(
+    volume: str, vol_rel: str, dst: str, interval_s: int
+) -> tuple[threading.Event, threading.Thread]:
+    """Periodically diff-sync `volume:/vol_rel` to local `dst` while a modal
+    run is in flight. Caller signals the returned event to stop the loop,
+    then joins the thread.
+    """
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(interval_s):
+            try:
+                _incremental_volume_sync(volume, vol_rel, dst)
+            except Exception as e:
+                print(f"[modal-runner] poller error (continuing): {e}", flush=True)
+
+    t = threading.Thread(target=_loop, daemon=True, name="mr-output-poller")
+    t.start()
+    return stop, t
 
 
 DEFAULT_SNAPSHOT_EXCLUDES = [
@@ -312,19 +411,36 @@ def run(
                 "--mounts-json", json.dumps(mounts),
             ]
 
-            with open(log_path, "wb") as logf:
-                proc = subprocess.Popen(
-                    cmd,
-                    env=launch_env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+            # Stream intermediate checkpoints back during training so
+            # caller's local OUTPUT_PATH stays current. Only enabled when
+            # OUTPUT_PATH is set; safe even if the volume slot doesn't yet
+            # exist (the poller just retries on the next tick).
+            poller_stop = poller_thread = None
+            out_path = os.environ.get("OUTPUT_PATH")
+            if out_path and OUTPUT_PULL_INTERVAL_S > 0:
+                poller_stop, poller_thread = _start_output_poller(
+                    volume, _vol_rel(out_path), out_path, OUTPUT_PULL_INTERVAL_S
                 )
-                assert proc.stdout is not None
-                for chunk in iter(lambda: proc.stdout.read(4096), b""):
-                    sys.stdout.buffer.write(chunk)
-                    sys.stdout.buffer.flush()
-                    logf.write(chunk)
-                rc = proc.wait()
+
+            try:
+                with open(log_path, "wb") as logf:
+                    proc = subprocess.Popen(
+                        cmd,
+                        env=launch_env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    assert proc.stdout is not None
+                    for chunk in iter(lambda: proc.stdout.read(4096), b""):
+                        sys.stdout.buffer.write(chunk)
+                        sys.stdout.buffer.flush()
+                        logf.write(chunk)
+                    rc = proc.wait()
+            finally:
+                if poller_stop is not None:
+                    poller_stop.set()
+                    if poller_thread is not None:
+                        poller_thread.join(timeout=10)
 
             # Always pull OUTPUT_PATH back so the local checkpoint dir is
             # current for the next retry and for the final result.
