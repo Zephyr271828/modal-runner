@@ -16,7 +16,7 @@
 #   • auto-resume on FunctionTimeoutError / NCCL watchdog / control-plane errors
 #   • per-app logs at logs/<name>/<timestamp>.log
 #
-# Launch with:   bash scripts/launch_train_modal_mr.sh
+# Launch with:   bash examples/launch_train_modal_mr.sh
 #
 # Prereqs:
 #   pip install -e /mnt/weka/home/yucheng/yufeng/modal-runner
@@ -37,8 +37,11 @@ GPU_TYPE="${GPU_TYPE:-B200}"
 NUM_GPUS="${NUM_GPUS:-8}"
 MAX_MODAL_GPUS="${MAX_MODAL_GPUS:-50}"
 MAX_RETRIES="${MAX_RETRIES:-5}"
-MR_IMAGE="${MR_IMAGE:-pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime}"
-MR_PIP_INSTALL="${MR_PIP_INSTALL:-transformers accelerate deepspeed wandb datasets peft sentencepiece}"
+MR_IMAGE="${MR_IMAGE:-nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04}"
+MR_PIP_INSTALL="${MR_PIP_INSTALL:-}"
+# Path to a requirements file used by modal-runner to build the image.
+# Picked up by modal_app.py via the MR_REQUIREMENTS env var.
+export MR_REQUIREMENTS="${MR_REQUIREMENTS:-${REPO_ROOT}/requirements_modal.txt}"
 
 # Paths the user script wants preserved end-to-end.
 DATA_PATH_COMMON="${REPO_ROOT}/src/training/sdar/tokenized_cache/${DATASET}/seq_${SEQ_LEN}"
@@ -56,7 +59,7 @@ mr() {
     DATASET="${DATASET}" \
     SEQ_LEN="${SEQ_LEN}" \
     $@ \
-    modal-runner run "${REPO_ROOT}/scripts/train_sdar_mtp.sh" \
+    modal-runner run "${REPO_ROOT}/examples/train_sdar_mtp.sh" \
       --name "${app_name}" \
       --num-gpus "${NUM_GPUS}" \
       --gpu-type "${GPU_TYPE}" \

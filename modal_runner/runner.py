@@ -299,6 +299,7 @@ def run(
                 "MR_TIMEOUT": str(timeout),
                 "MR_IMAGE": image,
                 "MR_PIP_INSTALL": pip_install,
+                "MR_REQUIREMENTS": os.environ.get("MR_REQUIREMENTS", ""),
                 "MR_VOLUME": volume,
             }
 

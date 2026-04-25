@@ -1,0 +1,18 @@
+# Single Modal install spec, consumed by modal-runner via MR_REQUIREMENTS.
+#
+# - PyPI deps come from `requirements.txt` (torch/flash-attn lines are
+#   commented out there; we install them explicitly below).
+# - Local-file entries (the flash-attn wheel) are auto-baked into the
+#   image by modal-runner: it detects paths that resolve to a real file
+#   relative to this file's directory, copies them into the image with
+#   `add_local_file(copy=True)`, and rewrites them to in-image paths
+#   before pip-installing.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+torchaudio==2.8.0+cu128
+
+-r requirements.txt
+
+flash_attn-2.8.3+cu128torch2.8-cp311-cp311-linux_x86_64.whl

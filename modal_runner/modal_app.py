@@ -8,6 +8,15 @@ The runner sets these before `modal run` so decorators pick them up at import:
     MR_TIMEOUT       per-invocation timeout (seconds). Modal caps at 86400.
     MR_IMAGE         base registry image tag
     MR_PIP_INSTALL   space-separated pip packages (optional)
+    MR_REQUIREMENTS  path to a requirements.txt to pip install (optional).
+                     Resolved on the local launching machine. Local-file
+                     entries (e.g. `./flash_attn-…whl`) are auto-baked into
+                     the image via `add_local_file(copy=True)` and rewritten
+                     to in-image paths so pip resolves them at build time.
+                     Editable (`-e`) entries that point into the uploaded
+                     repo still won't work — the repo isn't there yet at
+                     image-build time; use PYTHONPATH or a script-time
+                     `pip install -e ...` for those.
     MR_VOLUME        persistent modal.Volume name (default: modal-runner-vol)
 """
 
@@ -18,6 +27,7 @@ import pathlib
 import shlex
 import subprocess
 import sys
+import tempfile
 
 import modal
 
@@ -27,11 +37,41 @@ NUM_GPUS = int(os.environ.get("MR_NUM_GPUS", "1"))
 TIMEOUT = int(os.environ.get("MR_TIMEOUT", "86400"))
 IMAGE = os.environ.get("MR_IMAGE", "nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04")
 PIP_INSTALL = os.environ.get("MR_PIP_INSTALL", "").split()
+REQUIREMENTS = os.environ.get("MR_REQUIREMENTS", "").strip()
 VOLUME_NAME = os.environ.get("MR_VOLUME", "modal-runner-vol")
 
 _image = modal.Image.from_registry(IMAGE, add_python="3.11").apt_install(
     "rsync", "git", "curl"
 )
+if REQUIREMENTS:
+    req_path = pathlib.Path(REQUIREMENTS)
+    if not req_path.is_file():
+        raise SystemExit(f"MR_REQUIREMENTS={REQUIREMENTS!r} is not a file")
+
+    # Detect local-file entries (e.g. ./flash_attn-...whl) and bake them
+    # into the image so pip can resolve them at build time. Lines are
+    # resolved relative to the requirements file's directory.
+    req_dir = req_path.parent
+    rewritten: list[str] = []
+    for raw in req_path.read_text().splitlines():
+        line = raw.strip()
+        if line and not line.startswith(("#", "-")):
+            cand = pathlib.Path(line) if os.path.isabs(line) else (req_dir / line)
+            if cand.is_file():
+                in_image = f"/wheels/{cand.name}"
+                _image = _image.add_local_file(
+                    str(cand.resolve()), in_image, copy=True
+                )
+                rewritten.append(in_image)
+                continue
+        rewritten.append(raw)
+
+    tmp = tempfile.NamedTemporaryFile(
+        "w", suffix=".txt", prefix="mr-req-", delete=False
+    )
+    tmp.write("\n".join(rewritten) + "\n")
+    tmp.close()
+    _image = _image.pip_install_from_requirements(tmp.name)
 if PIP_INSTALL:
     _image = _image.pip_install(*PIP_INSTALL)
 
