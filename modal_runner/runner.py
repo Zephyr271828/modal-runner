@@ -20,7 +20,23 @@ from typing import Optional
 from . import queue
 
 RETRY_PATTERNS = {
-    "modal_timeout": re.compile(r"FunctionTimeoutError"),
+    # Modal-side function/runner timeout. The exact line varies by which
+    # component reports the timeout first:
+    #   - "FunctionTimeoutError" — Modal client side, only present if the
+    #     local `modal run` process received the failure message before its
+    #     stream wedged.
+    #   - "Runner has been running for too long" / "max runtime: N seconds"
+    #     — printed by the user-script wrapper when Modal sends SIGINT.
+    #     Always present in the run log, even when the local stream stalled.
+    #   - "hit its timeout of \d+s" — alternate Modal client phrasing.
+    # We match all of them so silence-watchdog kills (which leave only the
+    # script-side messages) still get classified as retriable.
+    "modal_timeout": re.compile(
+        r"FunctionTimeoutError"
+        r"|Runner has been running for too long"
+        r"|max runtime:\s*\d+\s*seconds"
+        r"|hit its timeout of \d+s"
+    ),
     "nccl_watchdog": re.compile(
         r"Watchdog caught collective operation timeout"
         r"|ProcessGroupNCCL.*timeout"
@@ -464,6 +480,12 @@ def run(
                     assert proc.stdout is not None
                     fd = proc.stdout.fileno()
                     last_data = time.monotonic()
+                    # Track whether the app ever reached the running state.
+                    # Once it has, a subsequent tasks==0 means the container
+                    # died (e.g. Modal 24h timeout) and the local `modal run`
+                    # stream is wedged — at that point we MUST kill instead
+                    # of deferring, otherwise the parent waits forever.
+                    saw_running = False
                     while True:
                         ready, _, _ = select.select([fd], [], [], 30.0)
                         if ready:
@@ -480,16 +502,20 @@ def run(
                                 break
                             silent_for = time.monotonic() - last_data
                             if SILENCE_TIMEOUT_S > 0 and silent_for > SILENCE_TIMEOUT_S:
-                                # Only kill if the app is actually running
-                                # (Tasks >= 1). During image build / GPU queue
-                                # the log can be silent for many minutes — that
-                                # is not a hang, so we wait it out.
+                                # Defer the watchdog only during the pre-run
+                                # phase (image build / GPU queue), when tasks
+                                # has never been >= 1. Once we've seen the
+                                # app running, tasks==0 means the container
+                                # has exited and the local stream is wedged
+                                # — kill so the retry loop can advance.
                                 tasks = _modal_app_tasks(app_name)
-                                if tasks is None or tasks < 1:
+                                if tasks is not None and tasks >= 1:
+                                    saw_running = True
+                                if not saw_running and (tasks is None or tasks < 1):
                                     note = (
                                         f"[modal-runner] silent for {int(silent_for)}s but "
-                                        f"app not in running state (tasks={tasks}); "
-                                        f"watchdog deferred\n"
+                                        f"app not yet running (tasks={tasks}); "
+                                        f"watchdog deferred (pre-run phase)\n"
                                     ).encode()
                                     sys.stdout.buffer.write(note)
                                     sys.stdout.buffer.flush()
