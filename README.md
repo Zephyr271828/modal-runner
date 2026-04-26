@@ -90,9 +90,17 @@ Logs land at `logs/<name>/<YYYYMMDD_HHMMSS>.log` — one per attempt.
 ### Other commands
 
 ```bash
-modal-runner jobs        # show in-flight GPUs + `modal app list`
-modal-runner clean -y    # stop stale modal-runner apps
+modal-runner jobs                       # show in-flight GPUs + `modal app list`
+modal-runner status                     # per-job state, latest-log progress, ETA
+modal-runner status --filter sdar       # restrict to names containing "sdar"
+modal-runner kill sdar-1_7b-run42 -y    # stop one job (modal app stop + SIGTERM launcher)
+modal-runner kill --filter sdar         # kill all live launchers matching substring
+modal-runner clean -y                   # stop stale modal-runner apps
 ```
+
+`kill` first runs `modal app stop` to release Modal-side GPUs, then SIGTERMs
+the local launcher (SIGKILL after `--grace` seconds, default 15) so its
+`finally` block drops the local GPU-slot reservation.
 
 ## What it does on each run
 
