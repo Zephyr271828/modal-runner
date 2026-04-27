@@ -243,10 +243,35 @@ def classify(d: Path, live_names: dict[str, int]) -> JobStatus | None:
     # run log that has any (older logs as fallback) so DONE / FAILED /
     # RESTARTING / DEAD still show how far the job got. ETA is only
     # meaningful while RUNNING, so we leave it blank elsewhere.
-    def _attach_progress() -> None:
+    def _attach_progress(suppress_rate: bool = False) -> None:
         step, total, rate, _e, _r = parse_tqdm_from_logs(run_candidates)
         if total > 0:
-            js.step, js.total, js.rate = step, total, rate
+            js.step, js.total = step, total
+            if not suppress_rate:
+                js.rate = rate
+
+    # If ANY prior attempt logged train_runtime, the job is DONE — treat
+    # any currently-alive launcher as a stray relaunch on top of completed
+    # training (worth flagging in the note so the user can kill it).
+    prior_done_log = next(
+        (
+            p for p in run_candidates
+            if TRAIN_RUNTIME_RE.search(
+                "\n".join(p.read_text(errors="replace").splitlines()[-4000:])
+            )
+        ),
+        None,
+    )
+    if prior_done_log is not None:
+        js.state = "DONE"
+        # Once any log shows the final step reached + checkpoint saved
+        # (train_runtime is emitted by HF Trainer right after the last
+        # save), the run is complete regardless of any stray launcher.
+        js.note = "training complete"
+        _attach_progress()
+        if js.total > 0:
+            js.step = js.total
+        return js
 
     # If we have a fresh run log, check terminal states first.
     if runlog is not None and runlog.stat().st_size > 0:
@@ -285,6 +310,18 @@ def classify(d: Path, live_names: dict[str, int]) -> JobStatus | None:
         _attach_progress()
         return js
 
+    # Prior-progress note prefix for STARTING rows: shows the furthest tqdm
+    # step from any older run log, plus "(done)" if a prior attempt logged
+    # train_runtime. Rate is suppressed because it's from a stale attempt.
+    def _starting_prior_tag() -> str:
+        prior_done = any(
+            TRAIN_RUNTIME_RE.search(
+                "\n".join(p.read_text(errors="replace").splitlines()[-200:])
+            )
+            for p in run_candidates
+        )
+        return "prior done" if prior_done else "prior progress"
+
     if runlog is None or runlog.stat().st_size == 0:
         js.state = "STARTING"
         if runlog is not None:
@@ -292,9 +329,9 @@ def classify(d: Path, live_names: dict[str, int]) -> JobStatus | None:
             js.note = f"silent {age_min:.0f}m"
         else:
             js.note = "no run output yet"
-        # Surface progress from prior attempts (autoresume will pick up
-        # from there once the new container starts).
-        _attach_progress()
+        _attach_progress(suppress_rate=True)
+        if js.total > 0:
+            js.note = f"{js.note} ({_starting_prior_tag()})".strip()
         return js
 
     run_tail_norm = "\n".join(
@@ -305,7 +342,9 @@ def classify(d: Path, live_names: dict[str, int]) -> JobStatus | None:
         js.state = "STARTING"
         age_min = (datetime.now().timestamp() - runlog.stat().st_mtime) / 60
         js.note = f"silent {age_min:.0f}m"
-        _attach_progress()
+        _attach_progress(suppress_rate=True)
+        if js.total > 0:
+            js.note = f"{js.note} ({_starting_prior_tag()})".strip()
         return js
 
     js.state = "RUNNING"
