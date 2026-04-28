@@ -87,6 +87,20 @@ launch-log path, then returns. Pass `-f` / `--foreground` to stay attached.
 
 Logs land at `logs/<name>/<YYYYMMDD_HHMMSS>.log` — one per attempt.
 
+### Selecting a Modal account
+
+If you have multiple Modal profiles in `~/.modal.toml` (set up via
+`modal profile add` / `modal token set --profile`), pass `--user/-u` to
+choose which one to use. The flag sets `MODAL_PROFILE` for every `modal`
+call this runner makes (CLI subprocesses, SDK, and the detached background
+launcher). `MODAL_PROFILE=acct-a modal-runner ...` works equivalently.
+
+```bash
+modal-runner run ./train.sh --name foo --user acct-a
+modal-runner jobs   --user acct-b
+modal-runner kill   --filter foo --user acct-a -y
+```
+
 ### Other commands
 
 ```bash

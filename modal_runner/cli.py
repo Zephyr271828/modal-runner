@@ -19,6 +19,15 @@ def _default_name(script: str) -> str:
     return pathlib.Path(script).stem
 
 
+def _apply_user(user: str | None) -> None:
+    """Route every `modal` CLI/SDK call through the named profile in
+    ~/.modal.toml. Setting MODAL_PROFILE before subprocess and `import modal`
+    is the supported way to pick between accounts.
+    """
+    if user:
+        os.environ["MODAL_PROFILE"] = user
+
+
 def _detach(args: argparse.Namespace, name: str) -> int:
     """Re-exec ourselves in the background, detached from the terminal.
 
@@ -45,6 +54,8 @@ def _detach(args: argparse.Namespace, name: str) -> int:
         "--timeout": str(args.timeout),
         "--log-dir": args.log_dir,
     }
+    if args.user:
+        passthrough["--user"] = args.user
     for k, v in passthrough.items():
         argv += [k, v]
     argv.append(args.script)
@@ -67,6 +78,7 @@ def _detach(args: argparse.Namespace, name: str) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    _apply_user(args.user)
     name = args.name or _default_name(args.script)
     if not args.foreground:
         return _detach(args, name)
@@ -87,6 +99,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_jobs(args: argparse.Namespace) -> int:
+    _apply_user(args.user)
     total, breakdown = queue.current_modal_gpus()
     print(f"In-flight modal-runner GPUs: {total}")
     for name, n, gpu in breakdown:
@@ -124,6 +137,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
     its ``finally`` block drops the local slot reservation. SIGKILL after a
     short grace period if it doesn't exit.
     """
+    _apply_user(args.user)
     live = progress.live_launcher_names()
     if args.name:
         targets = {n: pid for n, pid in live.items() if n in args.name}
@@ -187,12 +201,21 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
+    _apply_user(args.user)
     total, breakdown = queue.current_modal_gpus()
     # Best-effort: let the user stop any stale modal-runner app by name.
     for name, _, _ in breakdown:
         if args.yes or input(f"stop app {name}? [y/N] ").lower() == "y":
             subprocess.run(["modal", "app", "stop", name])
     return 0
+
+
+def _add_user_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-u", "--user",
+        default=os.environ.get("MODAL_PROFILE"),
+        help="Modal profile name from ~/.modal.toml (sets MODAL_PROFILE)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -229,13 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="stay attached to the terminal (default: detach & run in background)",
     )
+    _add_user_arg(pr)
     pr.set_defaults(func=cmd_run)
 
     pj = sub.add_parser("jobs", help="show modal-runner GPU usage and app list")
+    _add_user_arg(pj)
     pj.set_defaults(func=cmd_jobs)
 
     pc = sub.add_parser("clean", help="stop stale modal-runner apps")
     pc.add_argument("--yes", "-y", action="store_true")
+    _add_user_arg(pc)
     pc.set_defaults(func=cmd_clean)
 
     ps = sub.add_parser("status", help="snapshot per-job state, progress, ETA")
@@ -248,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--filter", default=None, help="substring filter on job name")
     pk.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
     pk.add_argument("--grace", type=int, default=15, help="SIGTERM grace period (s) before SIGKILL")
+    _add_user_arg(pk)
     pk.set_defaults(func=cmd_kill)
 
     return p
