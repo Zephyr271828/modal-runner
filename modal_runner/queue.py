@@ -23,7 +23,19 @@ import re
 import subprocess
 import time
 
-SLOTS_DIR = pathlib.Path.home() / ".cache" / "modal-runner" / "slots"
+_SLOTS_BASE = pathlib.Path.home() / ".cache" / "modal-runner" / "slots"
+
+
+def _slots_dir() -> pathlib.Path:
+    """Per-Modal-profile slots dir.
+
+    Each Modal account has independent GPU quota, so there's no reason a
+    heavyball job should block a yucheng job (or vice versa). The active
+    profile is set by ``cli._apply_user`` via ``MODAL_PROFILE``; if unset
+    (default profile), we use a stable ``__default__`` namespace.
+    """
+    profile = os.environ.get("MODAL_PROFILE") or "__default__"
+    return _SLOTS_BASE / profile
 
 GPU_SUFFIX_RE = re.compile(r"__gpu(\d+)x([A-Za-z0-9_-]+)$")
 
@@ -100,10 +112,11 @@ def _pid_alive(pid: int) -> bool:
 
 def _read_local_reservations() -> tuple[int, list[pathlib.Path]]:
     """Sum reserved GPUs across alive launches, reaping stale entries."""
-    SLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    slots_dir = _slots_dir()
+    slots_dir.mkdir(parents=True, exist_ok=True)
     total = 0
     live: list[pathlib.Path] = []
-    for f in sorted(SLOTS_DIR.glob("slot-*.json")):
+    for f in sorted(slots_dir.glob("slot-*.json")):
         try:
             d = json.loads(f.read_text())
             pid = int(d.get("pid", -1))
@@ -138,8 +151,9 @@ def acquire_slot(need: int, cap: int, poll_s: int = 30) -> pathlib.Path:
         raise SystemExit(
             f"requested {need} GPUs exceeds cap {cap}; raise --max-modal-gpus"
         )
-    SLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = SLOTS_DIR / ".lock"
+    slots_dir = _slots_dir()
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = slots_dir / ".lock"
     while True:
         with open(lock_path, "a+") as lf:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
@@ -148,7 +162,7 @@ def acquire_slot(need: int, cap: int, poll_s: int = 30) -> pathlib.Path:
                 cur_modal, _ = current_modal_gpus()
                 cur = max(cur_local, cur_modal)
                 if cur + need <= cap:
-                    slot = SLOTS_DIR / f"slot-{os.getpid()}-{int(time.time()*1000)}.json"
+                    slot = slots_dir / f"slot-{os.getpid()}-{int(time.time()*1000)}.json"
                     slot.write_text(json.dumps({"pid": os.getpid(), "n": need}))
                     return slot
                 print(
