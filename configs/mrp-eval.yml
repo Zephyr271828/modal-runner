@@ -18,7 +18,7 @@ ssh_public_keys:
 
 github_ssh_key: ~/.ssh/id_ed25519_github
 
-git_repo: git@github.com:heavyball-research/multi-token-denoising.git
+git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 
 apt_packages:
   - openssh-server
