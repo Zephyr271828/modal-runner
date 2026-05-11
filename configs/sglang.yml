@@ -1,0 +1,50 @@
+# Example: sglang dev environment with conda + repo clone baked in.
+
+app_name: sglang-ssh
+job_name: sglang
+open_vscode: true
+base_image: lmsysorg/sglang:latest
+
+gpu:
+  type: H100
+  count: 4
+
+duration_hours: 24
+
+ssh_public_keys:
+  - ~/.ssh/id_ed25519_modal.pub
+
+github_ssh_key: ~/.ssh/id_ed25519_github
+
+apt_packages:
+  - openssh-server
+  - git
+  - wget
+  - tmux
+  - vim
+
+run_commands:
+  # Miniconda
+  - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
+  - bash /tmp/miniconda.sh -b && rm /tmp/miniconda.sh
+  - /root/miniconda3/bin/conda init bash
+  - /root/miniconda3/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+  - /root/miniconda3/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+  # sglang env
+  - /root/miniconda3/bin/conda create -n sglang python=3.12 -y
+  - /root/miniconda3/envs/sglang/bin/pip install sglang
+  - echo 'source /root/miniconda3/etc/profile.d/conda.sh' >> /root/.bashrc
+  - echo 'conda activate sglang' >> /root/.bashrc
+  - echo 'source /root/.bashrc' >> /root/.profile
+  # Code
+  - mkdir -p /root/github_repos && cd /root/github_repos && git clone https://github.com/Rebekk/qq_sglang.git
+
+volumes:
+  /root/.cache/huggingface: huggingface-cache
+
+secrets:
+  - huggingface-secret
+
+shell_env:
+  HF_HOME: /root/.cache/huggingface
+  HF_TOKEN: $HF_TOKEN

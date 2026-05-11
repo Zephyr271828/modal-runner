@@ -1,0 +1,55 @@
+# Base config — minimal SSH-able GPU VM.
+# Override at runtime: CONFIG=configs/sglang.yml modal run --detach modal_ssh.py
+
+app_name: ssh-dev
+job_name: dev
+open_vscode: true
+base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+# Modal needs a known Python interpreter. For images without one (or where Modal can't detect it),
+# set add_python so Modal bundles its own. Omit if your base image already has Python that Modal recognizes.
+add_python: "3.11"
+
+gpu:
+  type: H100
+  count: 4
+
+duration_hours: 24
+
+# Public keys injected into /root/.ssh/authorized_keys.
+# Paths are expanded locally; the private key of the first entry is used in the printed ssh command.
+ssh_public_keys:
+  - ~/.ssh/id_ed25519_modal.pub
+
+# Optional: private key uploaded to the VM and wired up for github.com (so `git clone git@github.com:...` works).
+github_ssh_key: ~/.ssh/id_ed25519_github
+
+# Optional: single repo cloned into the image at build time.
+# String form is also accepted, e.g. `git_repo: git@github.com:org/repo.git`.
+# git_repo:
+#   url: git@github.com:org/repo.git
+#   dest: /root/repo   # optional; defaults to /root/<repo-name>
+
+apt_packages:
+  - openssh-server
+  - git
+  - wget
+  - curl
+  - tmux
+  - vim
+
+# Extra shell commands run during image build (after ssh setup).
+run_commands: []
+
+# Modal Volumes mounted into the container. Key = mount path, value = volume name.
+volumes:
+  /root/.cache/huggingface: huggingface-cache
+
+# Modal Secrets attached to the function (must already exist in your Modal workspace).
+secrets:
+  - huggingface-secret
+
+# Env vars exported in /root/.profile so they're available after SSH login.
+# Values are literal strings; use $VAR to reference container-side env vars (e.g. secrets).
+shell_env:
+  HF_HOME: /root/.cache/huggingface
+  HF_TOKEN: $HF_TOKEN
