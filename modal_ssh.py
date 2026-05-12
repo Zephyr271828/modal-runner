@@ -70,6 +70,13 @@ if github_key:
         "ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null || true",
     )
 
+# Upload arbitrary local files into the image (optional).
+for local_path, remote_path in (cfg.get("local_files") or {}).items():
+    local_expanded = Path(local_path).expanduser()
+    if modal.is_local():
+        assert local_expanded.exists(), f"local_files entry not found: {local_expanded}"
+    image = image.add_local_file(str(local_expanded), remote_path, copy=True)
+
 # Clone a single git repo into the image (optional).
 repo_cfg = cfg.get("git_repo")
 REPO_DEST = None

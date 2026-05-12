@@ -18,6 +18,9 @@ ssh_public_keys:
 
 github_ssh_key: ~/.ssh/id_ed25519_github
 
+local_files:
+  ~/.modal.toml: /root/.modal.toml
+
 git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 
 apt_packages:
@@ -53,9 +56,9 @@ run_commands:
   - cd /root/multi-token-denoising && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
   # opencompass editable install
   - cd /root/multi-token-denoising/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
-  # Node.js + npm + Codex CLI
-  - apt-get update && apt-get install -y nodejs npm
-  - npm install -g @openai/codex
+  # Node.js 20 (apt's default is Node 12 — too old for Codex) + Codex CLI
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+  - npm install -g @openai/codex @openai/codex-linux-x64
   # nohup-queue helper
   - cd /root && git clone https://github.com/Zephyr271828/nohup-queue.git && /root/miniconda3/envs/opencompass/bin/pip install -e /root/nohup-queue
   # Auto-activate the env on SSH login
@@ -65,6 +68,7 @@ run_commands:
 
 volumes:
   /root/.cache/huggingface: huggingface-cache
+  /root/checkpoints: SDAR-MTD
 
 secrets:
   - huggingface-secret
