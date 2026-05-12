@@ -53,8 +53,9 @@ run_commands:
   - cd /root/multi-token-denoising && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
   # opencompass editable install
   - cd /root/multi-token-denoising/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
-  # Claude Code CLI
-  - curl -fsSL https://claude.ai/install.sh | bash
+  # Node.js + npm + Codex CLI
+  - apt-get update && apt-get install -y nodejs npm
+  - npm install -g @openai/codex
   # nohup-queue helper
   - cd /root && git clone https://github.com/Zephyr271828/nohup-queue.git && /root/miniconda3/envs/opencompass/bin/pip install -e /root/nohup-queue
   # Auto-activate the env on SSH login
