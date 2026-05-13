@@ -2,7 +2,7 @@
 
 app_name: mrp-eval-ssh
 job_name: mrp-eval
-open_vscode: true
+interactive: true
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
@@ -63,9 +63,24 @@ run_commands:
   - echo 'conda activate opencompass' >> /root/.bashrc
   - echo 'source /root/.bashrc' >> /root/.profile
 
+# Designated paths — both must be under a mount in `volumes:` below.
+# `eval_opencompass_hf.sh` uses opencompass `work_dir = ./outputs/opencompass/...`
+# and `nohup-queue` writes to `./logs/eval_opencompass_hf/`, both relative to
+# the repo root, so we mount volumes at those exact in-repo paths.
+output_dir: /root/multi-token-residual-prediction/outputs
+runlogs_dir: /root/.runlogs
+
+# Auto-resume scaffolding (flags only; not yet enforced).
+auto_resume: false
+max_resumes: 5
+# soft_timeout_minutes: 1410
+
 volumes:
   /root/.cache/huggingface: huggingface-cache
   /root/checkpoints: SDAR-MTD
+  /root/multi-token-residual-prediction/outputs: mrp-eval-outputs
+  /root/multi-token-residual-prediction/logs: mrp-eval-logs
+  /root/.runlogs: mrp-eval-runlogs
 
 secrets:
   - huggingface-secret

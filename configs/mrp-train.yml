@@ -2,7 +2,7 @@
 
 app_name: mrp-ssh
 job_name: mrp-train
-open_vscode: true
+interactive: true
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
@@ -60,8 +60,22 @@ run_commands:
   - echo 'source /root/.bashrc' >> /root/.profile
   - cd /root && git clone https://github.com/Zephyr271828/nohup-queue.git && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -e /root/nohup-queue
 
+# Designated paths — both must be under a mount in `volumes:` below.
+# `train_sdar_mrp.sh` writes checkpoints to the relative path `checkpoints/...`
+# from the repo root, so we mount the volume at that exact path so the
+# bytes hit the volume instead of the ephemeral container fs.
+output_dir: /root/multi-token-residual-prediction/checkpoints
+runlogs_dir: /root/.runlogs
+
+# Auto-resume scaffolding (flags only; not yet enforced).
+auto_resume: false
+max_resumes: 5
+# soft_timeout_minutes: 1410
+
 volumes:
   /root/.cache/huggingface: huggingface-cache
+  /root/multi-token-residual-prediction/checkpoints: mrp-train-checkpoints
+  /root/.runlogs: mrp-train-runlogs
 
 secrets:
   - huggingface-secret

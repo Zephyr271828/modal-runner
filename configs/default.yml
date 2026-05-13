@@ -3,7 +3,7 @@
 
 app_name: ssh-dev
 job_name: dev
-open_vscode: true
+interactive: true
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 # Modal needs a known Python interpreter. For images without one (or where Modal can't detect it),
 # set add_python so Modal bundles its own. Omit if your base image already has Python that Modal recognizes.
@@ -39,6 +39,20 @@ apt_packages:
 
 # Extra shell commands run during image build (after ssh setup).
 run_commands: []
+
+# Non-interactive batch commands (used only when `interactive: false`).
+# Each runs in a fresh login shell (`bash -lc`). Stop-on-first-failure.
+commands: []
+
+# Optional designated paths. Each MUST be under a mount declared in `volumes:`
+# so the bytes survive the container. Validated at launch.
+# output_dir:  /root/outputs       # where training/eval writes its results
+# runlogs_dir: /root/.runlogs      # where per-command stdout/stderr is tee'd
+
+# Auto-resume scaffolding (flags only for now — full resume logic comes later).
+auto_resume: false
+max_resumes: 5
+# soft_timeout_minutes: 1410       # null/unset → derive from duration_hours - 30min
 
 # Modal Volumes mounted into the container. Key = mount path, value = volume name.
 volumes:
