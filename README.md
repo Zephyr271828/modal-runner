@@ -19,7 +19,7 @@ YAML-driven CLI for Modal GPU VMs。两种模式共享同一份 yml + image:
 
 ```bash
 # 一次性安装
-cd modal-ssh-cli
+cd modal-runner
 pip install -e .
 
 # ── 交互式 ──
@@ -46,7 +46,7 @@ modal-ssh up -h                   # 子命令 help
 **必需**
 
 ```bash
-cd modal-ssh-cli && pip install -e .   # 注册 modal-ssh 到 PATH
+cd modal-runner && pip install -e .   # 注册 modal-ssh 到 PATH
 modal setup                            # Modal 认证(没做过的话)
 ```
 
@@ -341,7 +341,7 @@ modal-ssh down mrp-train-test --all           # 一锅端 base + 所有 -X
 ## 仓库结构
 
 ```
-modal-ssh-cli/
+modal-runner/
 ├── modal_ssh.py            # Modal app + 容器 sshd + local launcher 三合一
 ├── modal_ssh_cli.py        # CLI 入口(up/down/ls/ssh/run/logs/configs)
 ├── pyproject.toml          # console_scripts 注册 modal-ssh
