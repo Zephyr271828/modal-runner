@@ -1,7 +1,7 @@
 # Multi-token denoising dev environment.
 
 app_name: mrp-ssh
-job_name: mrp
+job_name: mrp-train
 open_vscode: true
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
@@ -9,7 +9,7 @@ add_python: "3.11"
 
 gpu:
   type: H100
-  count: 4
+  count: 8
 
 duration_hours: 24
 
@@ -18,7 +18,7 @@ ssh_public_keys:
 
 github_ssh_key: ~/.ssh/id_ed25519_github
 
-git_repo: git@github.com:heavyball-research/multi-token-denoising.git
+git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 
 apt_packages:
   - openssh-server
@@ -45,11 +45,13 @@ run_commands:
   # Torch (cu128)
   - /root/miniconda3/envs/llamafactory_sdar/bin/pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
   # Repo deps
-  - cd /root/multi-token-denoising && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -r requirements.txt
+  - cd /root/multi-token-residual-prediction && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -r requirements.txt
   # flash-attn build prerequisites (--no-build-isolation skips pip's isolated build env).
   - /root/miniconda3/envs/llamafactory_sdar/bin/pip install psutil packaging ninja wheel setuptools
   # flash-attn (needs torch present; --no-build-isolation so it sees the installed torch)
   - /root/miniconda3/envs/llamafactory_sdar/bin/pip install flash-attn==2.8.3 --no-build-isolation
+  # In-tree llamafactory package (editable) — launcher.py imports `llamafactory.*`
+  - cd /root/multi-token-residual-prediction/src/training/sdar/llama_factory_sdar && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -e .
   # Claude Code CLI
   - curl -fsSL https://claude.ai/install.sh | bash
   # Auto-activate the env on SSH login

@@ -86,9 +86,13 @@ if repo_cfg:
         repo_cfg.get("dest") if isinstance(repo_cfg, dict) else None
     ) or f"/root/{repo_url.rstrip('/').split('/')[-1].removesuffix('.git')}"
     REPO_DEST = repo_dest
+    # `git_repo_ref` (optional) is embedded in the command string so updating it
+    # busts Modal's image-step cache and forces a fresh clone. Use a branch/tag/sha
+    # or just bump an integer when the upstream repo changes.
+    repo_ref = cfg.get("git_repo_ref", "HEAD")
     image = image.run_commands(
         f"mkdir -p {os.path.dirname(repo_dest)}",
-        f"git clone {repo_url} {repo_dest}",
+        f"git clone {repo_url} {repo_dest} && cd {repo_dest} && git checkout {repo_ref} # cachebust",
     )
 
 if cfg.get("run_commands"):
