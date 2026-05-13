@@ -2,37 +2,26 @@
 
 app_name: mrp-eval-ssh
 job_name: mrp-eval
-interactive: true
-
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
 
-gpu:
-  type: H100
-  count: 8
+apt_packages: [openssh-server, git, wget, curl, tmux, vim, build-essential]
 
-duration_hours: 24
-
-ssh_public_keys:
-  - ~/.ssh/id_ed25519_modal.pub
-
+# Required for the private SSH-style clone below.
 github_ssh_key: ~/.ssh/id_ed25519_github
+git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 
+# Bake the local Modal credentials into the image so the VM can run `modal`
+# CLI itself. WARNING: any artifact derived from this image effectively
+# holds your Modal token. Comment this out if not needed.
 local_files:
   ~/.modal.toml: /root/.modal.toml
 
-git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
+# Adds the SDAR-MTD checkpoints volume on top of the base volumes dict.
+volumes:
+  /root/.cache/huggingface: huggingface-cache
+  /root/checkpoints: SDAR-MTD
 
-apt_packages:
-  - openssh-server
-  - git
-  - wget
-  - curl
-  - tmux
-  - vim
-  - build-essential
-
-# Each run_commands item is its own shell, so we use absolute pip paths and absolute cds.
 run_commands:
   # Miniconda
   - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
@@ -44,47 +33,20 @@ run_commands:
   - /root/miniconda3/bin/conda create -n opencompass python=3.10 -y
   # Torch (cu128)
   - /root/miniconda3/envs/opencompass/bin/pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128
-  # flash-attn build prereqs (--no-build-isolation skips pip's isolated build env).
+  # flash-attn build prereqs
   - /root/miniconda3/envs/opencompass/bin/pip install psutil packaging ninja wheel setuptools
-  # flash-attn — needs torch visible at build time.
   - /root/miniconda3/envs/opencompass/bin/pip install flash-attn==2.8.3 --no-build-isolation
-  # vllm with --no-deps so it doesn't drag in transformers>=4.55.2 (the requirements
-  # file pins an older transformers). Installed BEFORE requirements.txt so pip sees
-  # vllm==0.10.2 as already satisfied and skips re-resolving its deps.
+  # vllm pinned to 0.10.2 with --no-deps to avoid dragging in newer transformers
   - /root/miniconda3/envs/opencompass/bin/pip install --no-deps vllm==0.10.2
-  # Repo eval deps
-  - cd /root/multi-token-residual-prediction && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
-  # opencompass editable install
-  - cd /root/multi-token-residual-prediction/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
+  # Repo eval deps + opencompass editable install
+  - cd /root/multi-token-denoising && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
+  - cd /root/multi-token-denoising/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
+  # Node.js 20 + Codex CLI
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+  - npm install -g @openai/codex @openai/codex-linux-x64
   # nohup-queue helper
   - cd /root && git clone https://github.com/Zephyr271828/nohup-queue.git && /root/miniconda3/envs/opencompass/bin/pip install -e /root/nohup-queue
   # Auto-activate the env on SSH login
   - echo 'source /root/miniconda3/etc/profile.d/conda.sh' >> /root/.bashrc
   - echo 'conda activate opencompass' >> /root/.bashrc
   - echo 'source /root/.bashrc' >> /root/.profile
-
-# Designated paths — both must be under a mount in `volumes:` below.
-# `eval_opencompass_hf.sh` uses opencompass `work_dir = ./outputs/opencompass/...`
-# and `nohup-queue` writes to `./logs/eval_opencompass_hf/`, both relative to
-# the repo root, so we mount volumes at those exact in-repo paths.
-output_dir: /root/multi-token-residual-prediction/outputs
-runlogs_dir: /root/.runlogs
-
-# Auto-resume scaffolding (flags only; not yet enforced).
-auto_resume: false
-max_resumes: 5
-# soft_timeout_minutes: 1410
-
-volumes:
-  /root/.cache/huggingface: huggingface-cache
-  /root/checkpoints: SDAR-MTD
-  /root/multi-token-residual-prediction/outputs: mrp-eval-outputs
-  /root/multi-token-residual-prediction/logs: mrp-eval-logs
-  /root/.runlogs: mrp-eval-runlogs
-
-secrets:
-  - huggingface-secret
-
-shell_env:
-  HF_HOME: /root/.cache/huggingface
-  HF_TOKEN: $HF_TOKEN
