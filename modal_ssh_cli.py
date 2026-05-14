@@ -25,8 +25,10 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 CONFIGS_DIR = ROOT / "configs"
 APP_FILE = str(ROOT / "modal_ssh.py")
+MODAL_TOML = Path.home() / ".modal.toml"
 
 _INSTANCE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+_PROFILE_SECTION_RE = re.compile(r"^\[([^\]]+)\]", re.M)
 
 
 def _validate_instance(s: str | None) -> str | None:
@@ -36,6 +38,21 @@ def _validate_instance(s: str | None) -> str | None:
     if not _INSTANCE_RE.match(s):
         sys.exit(f"invalid --instance value: {s!r} (use alphanumerics, dashes, underscores)")
     return s
+
+
+def _apply_profile(profile: str | None) -> None:
+    """Set MODAL_PROFILE so downstream `modal` subprocess/exec calls use it.
+    No-op if profile is None (modal then falls back to whichever profile has
+    active=true in ~/.modal.toml)."""
+    if not profile:
+        return
+    if not MODAL_TOML.is_file():
+        sys.exit(f"~/.modal.toml not found — run `modal setup` first")
+    profiles = _PROFILE_SECTION_RE.findall(MODAL_TOML.read_text())
+    if profile not in profiles:
+        avail = ", ".join(profiles) or "(none)"
+        sys.exit(f"profile {profile!r} not found in ~/.modal.toml. Available: {avail}")
+    os.environ["MODAL_PROFILE"] = profile
 
 
 def _apply_instance(name: str, instance: str | None) -> str:
@@ -299,7 +316,14 @@ def main() -> None:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_up = sub.add_parser("up", help="launch a VM")
+    # Shared --profile arg for every subcommand that calls `modal`.
+    profile_parent = argparse.ArgumentParser(add_help=False)
+    profile_parent.add_argument(
+        "--profile",
+        help="Modal profile name from ~/.modal.toml (default: the profile with active=true)",
+    )
+
+    p_up = sub.add_parser("up", parents=[profile_parent], help="launch a VM")
     p_up.add_argument("config", nargs="?", help="config name (default: `default`)")
     p_up.add_argument("--gpu", help="override gpu spec, e.g. B200:2 or H100")
     p_up.add_argument("--duration", type=float, help="override duration_hours")
@@ -310,7 +334,7 @@ def main() -> None:
     )
     p_up.set_defaults(func=cmd_up)
 
-    p_down = sub.add_parser("down", help="stop a VM")
+    p_down = sub.add_parser("down", parents=[profile_parent], help="stop a VM")
     p_down.add_argument("config", nargs="?")
     p_down.add_argument("--instance", help="target a specific instance (same id as up)")
     p_down.add_argument(
@@ -319,7 +343,7 @@ def main() -> None:
     )
     p_down.set_defaults(func=cmd_down)
 
-    p_ls = sub.add_parser("ls", help="list running modal-ssh VMs")
+    p_ls = sub.add_parser("ls", parents=[profile_parent], help="list running modal-ssh VMs")
     p_ls.set_defaults(func=cmd_ls)
 
     p_ssh = sub.add_parser("ssh", help="ssh into a running VM")
@@ -327,7 +351,7 @@ def main() -> None:
     p_ssh.add_argument("--instance", help="connect to a specific instance")
     p_ssh.set_defaults(func=cmd_ssh)
 
-    p_run = sub.add_parser("run", help="submit a bash script as a background job")
+    p_run = sub.add_parser("run", parents=[profile_parent], help="submit a bash script as a background job")
     p_run.add_argument("config", help="config name")
     p_run.add_argument("script", help="path to local bash script to run on the VM")
     p_run.add_argument("--gpu", help="override gpu spec, e.g. B200:2 or H100")
@@ -339,7 +363,7 @@ def main() -> None:
     )
     p_run.set_defaults(func=cmd_run)
 
-    p_logs = sub.add_parser("logs", help="tail/replay an app's logs")
+    p_logs = sub.add_parser("logs", parents=[profile_parent], help="tail/replay an app's logs")
     p_logs.add_argument("config", nargs="?")
     p_logs.add_argument("--instance", help="target a specific instance")
     p_logs.set_defaults(func=cmd_logs)
@@ -348,6 +372,7 @@ def main() -> None:
     p_cfg.set_defaults(func=cmd_configs)
 
     args = p.parse_args()
+    _apply_profile(getattr(args, "profile", None))
     args.func(args)
 
 
