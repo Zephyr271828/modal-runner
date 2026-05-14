@@ -3,7 +3,12 @@
 
 app_name: sglang-ssh
 job_name: sglang
+modal_profile: zephyr271828
 base_image: lmsysorg/sglang:latest
+
+gpu:
+  type: H100
+  count: 4
 
 run_commands:
   # Miniconda

@@ -15,9 +15,17 @@ ssh_public_keys:
 # uncomment (or set per-config) if your VM needs private-repo access.
 # github_ssh_key: ~/.ssh/id_ed25519_github
 
+# Modal workspace/profile to use (as configured via `modal profile`).
+# Sets MODAL_PROFILE for every `modal` subprocess this CLI shells out to.
+# Omit/null to fall back to the user's active profile. Each config is
+# expected to redeclare this explicitly for clarity at a glance.
+modal_profile: null
+
 duration_hours: 24
 open_vscode: true
 
+# Default GPU spec. Each config is expected to redeclare this explicitly
+# (the value lives here only as a safety net for terse configs).
 gpu:
   type: H100
   count: 4

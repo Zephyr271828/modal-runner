@@ -55,15 +55,47 @@ def _resolve_cfg(name: str | None) -> Path:
     sys.exit(f"config not found: {name}")
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base or {})
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def _load(cfg_path: Path) -> dict:
-    return yaml.safe_load(cfg_path.read_text()) or {}
+    """Load `cfg_path`, deep-merging `_base.yml` (if present) underneath it.
+    Mirrors the loader in modal_ssh.py so `modal_profile` and other inherited
+    fields are visible to the CLI without each config having to redeclare them.
+    """
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    base = cfg_path.parent / "_base.yml"
+    if base.exists() and base.resolve() != cfg_path.resolve():
+        cfg = _deep_merge(yaml.safe_load(base.read_text()) or {}, cfg)
+    return cfg
+
+
+def _profile_env(
+    cfg: dict, base_env: dict | None = None, override: str | None = None,
+) -> dict:
+    """Return a copy of `base_env` (default: os.environ) with MODAL_PROFILE
+    set. Precedence: `--profile` CLI flag (override) > cfg's `modal_profile`
+    > leave env untouched (user's active profile)."""
+    env = dict(base_env if base_env is not None else os.environ)
+    profile = override or cfg.get("modal_profile")
+    if profile:
+        env["MODAL_PROFILE"] = str(profile)
+    return env
 
 
 # ── Subcommands ──────────────────────────────────────────────────────────
 
 def cmd_up(args: argparse.Namespace) -> None:
     cfg_path = _resolve_cfg(args.config)
-    env = {**os.environ, "CONFIG": str(cfg_path)}
+    cfg = _load(cfg_path)
+    env = {**_profile_env(cfg, override=args.profile), "CONFIG": str(cfg_path)}
     if args.gpu:
         env["MODAL_SSH_GPU"] = args.gpu
     if args.duration:
@@ -81,12 +113,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     """Submit a bash script as a Modal background job. Shares image / yml
     with `up`, but the container runs the script instead of sshd."""
     cfg_path = _resolve_cfg(args.config)
+    cfg = _load(cfg_path)
     script_path = Path(args.script).expanduser().resolve()
     if not script_path.is_file():
         sys.exit(f"script not found: {script_path}")
 
     env = {
-        **os.environ,
+        **_profile_env(cfg, override=args.profile),
         "CONFIG": str(cfg_path),
         "MODAL_SSH_MODE": "job",
         "MODAL_SSH_SCRIPT": str(script_path),
@@ -120,20 +153,22 @@ def cmd_logs(args: argparse.Namespace) -> None:
     target_name = _apply_instance(base_app, inst)
 
     # Pick newest live (or recent) app with that name.
-    matches = [a for a in _list_apps() if _app_name(a) == target_name]
+    env = _profile_env(cfg, override=args.profile)
+    matches = [a for a in _list_apps(env) if _app_name(a) == target_name]
     if not matches:
         sys.exit(f"no app named {target_name} — has it ever been started?")
     # modal app list seems to return newest-first; take the first.
     appid = _app_id(matches[0])
     print(f"→ modal app logs {appid} ({target_name})")
-    os.execvp("modal", ["modal", "app", "logs", appid])
+    os.execvpe("modal", ["modal", "app", "logs", appid], env)
 
 
-def _list_apps() -> list[dict]:
+def _list_apps(env: dict | None = None) -> list[dict]:
     try:
         out = subprocess.run(
             ["modal", "app", "list", "--json"],
             capture_output=True, text=True, check=True,
+            env=env,
         ).stdout
     except subprocess.CalledProcessError as e:
         sys.exit(f"modal app list failed: {e.stderr or e}")
@@ -176,7 +211,8 @@ def cmd_down(args: argparse.Namespace) -> None:
             return n == target
         scope_desc = target
 
-    matches = [a for a in _list_apps()
+    env = _profile_env(cfg, override=args.profile)
+    matches = [a for a in _list_apps(env)
                if match(_app_name(a)) and _is_live(_app_state(a))]
     if not matches:
         print(f"(no live app for {scope_desc})")
@@ -185,10 +221,10 @@ def cmd_down(args: argparse.Namespace) -> None:
         appid = _app_id(a)
         name = _app_name(a)
         print(f"→ modal app stop {appid} ({name})")
-        subprocess.run(["modal", "app", "stop", appid], check=False)
+        subprocess.run(["modal", "app", "stop", appid], check=False, env=env)
 
 
-def _live_container_app_ids() -> set[str]:
+def _live_container_app_ids(env: dict | None = None) -> set[str]:
     """Cross-reference `modal container list` to know which app IDs actually
     have a running container right now (vs zombie ephemeral apps left over
     from crashed functions)."""
@@ -196,17 +232,18 @@ def _live_container_app_ids() -> set[str]:
         out = subprocess.run(
             ["modal", "container", "list", "--json"],
             capture_output=True, text=True, check=True,
+            env=env,
         ).stdout
         return {_app_id(c) for c in json.loads(out) if _app_id(c)}
     except (subprocess.CalledProcessError, json.JSONDecodeError):
         return set()
 
 
-def _our_app_names() -> set[str]:
-    """Set of `app_name` values declared by any non-`_` config in CONFIGS_DIR.
-    Used to filter `modal app list` down to VMs launched via this CLI rather
-    than every app in the shared workspace."""
-    names: set[str] = set()
+def _our_apps_by_profile() -> dict[str | None, set[str]]:
+    """Group declared `app_name`s by their `modal_profile` (None = inherit
+    user's active profile). Lets `ls` query each Modal profile once and only
+    surface apps actually owned by configs targeting that profile."""
+    by_profile: dict[str | None, set[str]] = {}
     for p in CONFIGS_DIR.glob("*.yml"):
         if p.name.startswith("_"):
             continue
@@ -215,8 +252,8 @@ def _our_app_names() -> set[str]:
         except Exception:
             continue
         if cfg.get("app_name"):
-            names.add(cfg["app_name"])
-    return names
+            by_profile.setdefault(cfg.get("modal_profile"), set()).add(cfg["app_name"])
+    return by_profile
 
 
 def _is_our_app(name: str, our_base: set[str]) -> bool:
@@ -228,25 +265,31 @@ def _is_our_app(name: str, our_base: set[str]) -> bool:
 
 
 def cmd_ls(args: argparse.Namespace) -> None:
-    our_names = _our_app_names()
-    live_app_ids = _live_container_app_ids()
-    rows: list[tuple[str, str, str, str]] = []
-    for a in _list_apps():
-        name = _app_name(a)
-        state = _app_state(a)
-        if not _is_live(state) or not _is_our_app(name, our_names):
-            continue
-        appid = _app_id(a)
-        kind = "running" if appid in live_app_ids else "zombie (no container)"
-        rows.append((appid, name, state or "running", kind))
+    by_profile = _our_apps_by_profile()
+    rows: list[tuple[str, str, str, str, str]] = []
+    for profile, our_names in by_profile.items():
+        env = dict(os.environ)
+        if profile:
+            env["MODAL_PROFILE"] = str(profile)
+        live_app_ids = _live_container_app_ids(env)
+        profile_label = profile or "(active)"
+        for a in _list_apps(env):
+            name = _app_name(a)
+            state = _app_state(a)
+            if not _is_live(state) or not _is_our_app(name, our_names):
+                continue
+            appid = _app_id(a)
+            kind = "running" if appid in live_app_ids else "zombie (no container)"
+            rows.append((appid, name, profile_label, state or "running", kind))
     if not rows:
         print("(no running modal-ssh VMs)")
         return
     wid = max(len(r[0]) for r in rows)
     wnm = max(len(r[1]) for r in rows)
-    wst = max(len(r[2]) for r in rows)
-    for appid, name, state, kind in rows:
-        print(f"  {appid:<{wid}}  {name:<{wnm}}  {state:<{wst}}  {kind}")
+    wpf = max(len(r[2]) for r in rows)
+    wst = max(len(r[3]) for r in rows)
+    for appid, name, profile, state, kind in rows:
+        print(f"  {appid:<{wid}}  {name:<{wnm}}  {profile:<{wpf}}  {state:<{wst}}  {kind}")
 
 
 def cmd_ssh(args: argparse.Namespace) -> None:
@@ -287,7 +330,8 @@ def cmd_configs(args: argparse.Namespace) -> None:
             cfg = _load(p)
         except Exception:
             cfg = {}
-        print(f"  {p.stem:<{w}}  {cfg.get('base_image', '?')}")
+        profile = cfg.get("modal_profile") or "(active)"
+        print(f"  {p.stem:<{w}}  [{profile}]  {cfg.get('base_image', '?')}")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────
@@ -303,6 +347,7 @@ def main() -> None:
     p_up.add_argument("config", nargs="?", help="config name (default: `default`)")
     p_up.add_argument("--gpu", help="override gpu spec, e.g. B200:2 or H100")
     p_up.add_argument("--duration", type=float, help="override duration_hours")
+    p_up.add_argument("--profile", help="override modal_profile (Modal workspace)")
     p_up.add_argument(
         "--instance",
         help="parallel-instance suffix: appends -<id> to app_name and job_name "
@@ -312,6 +357,7 @@ def main() -> None:
 
     p_down = sub.add_parser("down", help="stop a VM")
     p_down.add_argument("config", nargs="?")
+    p_down.add_argument("--profile", help="override modal_profile (Modal workspace)")
     p_down.add_argument("--instance", help="target a specific instance (same id as up)")
     p_down.add_argument(
         "--all", action="store_true",
@@ -332,6 +378,7 @@ def main() -> None:
     p_run.add_argument("script", help="path to local bash script to run on the VM")
     p_run.add_argument("--gpu", help="override gpu spec, e.g. B200:2 or H100")
     p_run.add_argument("--duration", type=float, help="override duration_hours")
+    p_run.add_argument("--profile", help="override modal_profile (Modal workspace)")
     p_run.add_argument("--instance", help="instance suffix (same as for up/down)")
     p_run.add_argument(
         "-f", "--foreground", action="store_true",
@@ -341,6 +388,7 @@ def main() -> None:
 
     p_logs = sub.add_parser("logs", help="tail/replay an app's logs")
     p_logs.add_argument("config", nargs="?")
+    p_logs.add_argument("--profile", help="override modal_profile (Modal workspace)")
     p_logs.add_argument("--instance", help="target a specific instance")
     p_logs.set_defaults(func=cmd_logs)
 

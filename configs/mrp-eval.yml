@@ -1,11 +1,16 @@
-# Multi-token denoising eval (opencompass) environment.
+# Multi-token residual prediction eval (opencompass) environment.
 
 app_name: mrp-eval-ssh
 job_name: mrp-eval
+modal_profile: heavyball
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
 
-apt_packages: [openssh-server, git, wget, curl, tmux, vim, build-essential]
+gpu:
+  type: H100
+  count: 8
+
+apt_packages: [openssh-server, git, git-lfs, wget, curl, tmux, vim, build-essential]
 
 # Required for the private SSH-style clone below.
 github_ssh_key: ~/.ssh/id_ed25519_github
@@ -13,16 +18,23 @@ git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 
 # Bake the local Modal credentials into the image so the VM can run `modal`
 # CLI itself. WARNING: any artifact derived from this image effectively
-# holds your Modal token. Comment this out if not needed.
+# holds your Modal token. Comment out if not needed.
 local_files:
   ~/.modal.toml: /root/.modal.toml
 
-# Adds the SDAR-MTD checkpoints volume on top of the base volumes dict.
+# Adds eval-side persistence volumes on top of the base HF cache.
+# `eval_opencompass_hf.sh` uses opencompass `work_dir = ./outputs/opencompass/...`
+# and nohup-queue writes to `./logs/eval_opencompass_hf/`, both relative to the
+# repo root, so we mount volumes at those exact in-repo paths.
 volumes:
   /root/.cache/huggingface: huggingface-cache
   /root/checkpoints: SDAR-MTD
+  /root/multi-token-residual-prediction/outputs: mrp-eval-outputs
+  /root/multi-token-residual-prediction/logs: mrp-eval-logs
 
 run_commands:
+  # git-lfs: register smudge/clean filters, then pull any LFS blobs in the clone.
+  - git lfs install && cd /root/multi-token-residual-prediction && git lfs pull
   # Miniconda
   - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
   - bash /tmp/miniconda.sh -b && rm /tmp/miniconda.sh
@@ -33,17 +45,16 @@ run_commands:
   - /root/miniconda3/bin/conda create -n opencompass python=3.10 -y
   # Torch (cu128)
   - /root/miniconda3/envs/opencompass/bin/pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 torchaudio==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128
-  # flash-attn build prereqs
+  # flash-attn build prereqs (--no-build-isolation skips pip's isolated build env).
   - /root/miniconda3/envs/opencompass/bin/pip install psutil packaging ninja wheel setuptools
   - /root/miniconda3/envs/opencompass/bin/pip install flash-attn==2.8.3 --no-build-isolation
-  # vllm pinned to 0.10.2 with --no-deps to avoid dragging in newer transformers
+  # vllm pinned to 0.10.2 with --no-deps so it doesn't drag in transformers>=4.55.2
+  # (the requirements file pins an older transformers). Install BEFORE requirements.txt
+  # so pip sees vllm==0.10.2 as already satisfied and skips re-resolving its deps.
   - /root/miniconda3/envs/opencompass/bin/pip install --no-deps vllm==0.10.2
-  # Repo eval deps + opencompass editable install
-  - cd /root/multi-token-denoising && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
-  - cd /root/multi-token-denoising/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
-  # Node.js 20 + Codex CLI
-  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-  - npm install -g @openai/codex @openai/codex-linux-x64
+  # Repo eval deps + opencompass editable install (new repo layout).
+  - cd /root/multi-token-residual-prediction && /root/miniconda3/envs/opencompass/bin/pip install -r src/eval/requirements.txt
+  - cd /root/multi-token-residual-prediction/src/eval/opencompass && /root/miniconda3/envs/opencompass/bin/pip install -e .
   # nohup-queue helper
   - cd /root && git clone https://github.com/Zephyr271828/nohup-queue.git && /root/miniconda3/envs/opencompass/bin/pip install -e /root/nohup-queue
   # Auto-activate the env on SSH login

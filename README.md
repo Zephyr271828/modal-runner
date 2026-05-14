@@ -90,11 +90,13 @@ Start a dev VM using the `<config>` yml. `<config>` can be a short name (`sglang
 |---|---|
 | `--gpu <spec>` | Override GPU temporarily, e.g. `B200:2` / `H100` / `A10G:1` |
 | `--duration <hours>` | Override container lifetime |
+| `--profile <name>` | Override `modal_profile` (Modal workspace) for this invocation |
 | `--instance <id>` | Append `-<id>` suffix to `app_name` and `job_name` to run multiple instances of the same yml |
 
 ```bash
 modal-ssh up sglang                                  # Use yml defaults
 modal-ssh up sglang --gpu A100:1 --duration 1        # One A100 for 1 hour
+modal-ssh up sglang --profile heavyball              # Target a different Modal workspace
 modal-ssh up mrp-train-test --instance a             # Parallel instance mrp-train-test-a
 ```
 
@@ -144,6 +146,7 @@ Submit a local `<script>` as a background job. The container runs this script in
 |---|---|
 | `--gpu <spec>` | Override GPU |
 | `--duration <hours>` | Override lifetime |
+| `--profile <name>` | Override `modal_profile` for this invocation |
 | `--instance <id>` | Parallel instance suffix (same as `up`) |
 | `-f` / `--foreground` | Don't detach; stream stdout locally |
 
@@ -289,6 +292,7 @@ volumes:
 | `base_image` | Container base image |
 | `add_python` | Python version for Modal to add to the base image (omit if base already includes Python) |
 | `gpu.type` / `gpu.count` | e.g. `H100` / `4` |
+| `modal_profile` | Modal workspace/profile (as configured via `modal profile`). Sets `MODAL_PROFILE` for every `modal` subprocess; null/omitted falls back to the user's active profile. Overridable per-invocation with `--profile`. |
 | `duration_hours` | Container lifetime; auto-stops when expired |
 | `ssh_public_keys` | List of local pubkeys to inject into `authorized_keys` (first one's private key used as default IdentityFile) |
 | `github_ssh_key` | Optional — local GitHub private key path, baked into image to allow `git clone` of private repos inside the container |

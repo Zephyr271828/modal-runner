@@ -22,9 +22,14 @@
 
 app_name: mrp-train-test       # was: mrp-ssh
 job_name: mrp-test             # was: mrp  → ssh-config marker becomes `modal-vm-mrp-test`
+modal_profile: zephyr271828    # personal workspace, isolated from the team profile
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
+
+gpu:
+  type: H100
+  count: 4
 
 # build-essential is the only addition vs _base.yml's apt_packages.
 apt_packages: [openssh-server, git, wget, curl, tmux, vim, build-essential]
