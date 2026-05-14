@@ -5,6 +5,10 @@ app_name: sglang-ssh
 job_name: sglang
 base_image: lmsysorg/sglang:latest
 
+gpu:
+  type: H100
+  count: 4
+
 run_commands:
   # Miniconda
   - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
