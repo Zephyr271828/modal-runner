@@ -4,6 +4,8 @@ Run with:
     CONFIG=configs/<name>.yml modal run --detach modal_ssh.py
 or via the launch.sh wrapper.
 """
+from pathlib import Path
+
 import modal
 
 from src.app import app
@@ -14,6 +16,7 @@ from src.config import (
     INTERACTIVE,
     OUTPUT_DIR,
     RUNLOGS_DIR,
+    SCRIPT_PATH,
     cfg,
     volume_for,
 )
@@ -34,8 +37,21 @@ def main():
             # With --detach, the function keeps running after we return.
     else:
         print(f"\nApp name: {app.name}")
-        print("Running batch commands (non-interactive)...")
-        run_batch.remote(cfg.get("shell_env") or {}, cfg.get("commands") or [], RUNLOGS_DIR)
+        script_content = None
+        script_name = None
+        if SCRIPT_PATH:
+            script_content = Path(SCRIPT_PATH).read_text()
+            script_name = Path(SCRIPT_PATH).name
+            print(f"Running script (non-interactive): {SCRIPT_PATH}")
+        else:
+            print("Running batch commands (non-interactive)...")
+        run_batch.remote(
+            cfg.get("shell_env") or {},
+            cfg.get("commands") or [],
+            RUNLOGS_DIR,
+            script_content,
+            script_name,
+        )
         print("Batch finished. Modal app will stop.")
         if RUNLOGS_DIR:
             print(f"  Per-command logs: modal volume get {volume_for(RUNLOGS_DIR)} / ./logs/{cfg['job_name']}/")

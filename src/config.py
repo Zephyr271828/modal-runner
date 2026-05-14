@@ -23,6 +23,10 @@ from . import overrides as _overrides
 
 CONFIG_PATH = os.environ.get("CONFIG", "configs/default.yml")
 CONFIG_OVERRIDES = os.environ.get("CONFIG_OVERRIDES", "")
+# Local path to a shell script to execute in non-interactive mode (alternative
+# to inline `commands:`). Resolved at launch — NOT baked into the image, so
+# editing the script doesn't bust the modal image cache.
+SCRIPT_PATH = None  # populated below after cfg load
 
 cfg: dict = yaml.safe_load(Path(CONFIG_PATH).read_text())
 _diffs = _overrides.apply(cfg, CONFIG_OVERRIDES)
@@ -30,6 +34,16 @@ if _diffs and modal.is_local():
     print(f"[config] {CONFIG_PATH} + overrides:")
     for d in _diffs:
         print(f"  {d}")
+
+SCRIPT_PATH = cfg.get("script")
+if SCRIPT_PATH and cfg.get("commands"):
+    raise SystemExit(
+        "Config error: `script:` and `commands:` are mutually exclusive. "
+        "Use `script:` for multi-step shell logic; use `commands:` for a list of one-liners."
+    )
+if SCRIPT_PATH and modal.is_local():
+    if not Path(SCRIPT_PATH).is_file():
+        raise SystemExit(f"Config error: script={SCRIPT_PATH!r} not found.")
 
 GPU_SPEC = (
     f"{cfg['gpu']['type']}:{cfg['gpu']['count']}"

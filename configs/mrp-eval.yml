@@ -1,8 +1,8 @@
 # Multi-token denoising eval (opencompass) environment.
 
-app_name: mrp-eval-ssh
 job_name: mrp-eval
 interactive: true
+modal_profile: heavyball
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
@@ -26,6 +26,7 @@ git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 apt_packages:
   - openssh-server
   - git
+  - git-lfs
   - wget
   - curl
   - tmux
@@ -34,6 +35,9 @@ apt_packages:
 
 # Each run_commands item is its own shell, so we use absolute pip paths and absolute cds.
 run_commands:
+  # git-lfs: register smudge/clean filters, then pull any LFS blobs in the clone.
+  # No-op if the repo has no LFS-tracked files.
+  - git lfs install && cd /root/multi-token-residual-prediction && git lfs pull
   # Miniconda
   - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
   - bash /tmp/miniconda.sh -b && rm /tmp/miniconda.sh

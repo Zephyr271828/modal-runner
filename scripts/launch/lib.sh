@@ -46,6 +46,10 @@ load_config() {
     INTERACTIVE=$(read_cfg interactive true)
     REPO_DEST=$(_compute_repo_dest)
 
+    # Modal profile to use (from ~/.modal.toml). Overridable: `modal_profile=research`.
+    export MODAL_PROFILE=$(read_cfg modal_profile default)
+    echo "→ Modal profile: $MODAL_PROFILE"
+
     LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs/$JOB_NAME}"
     mkdir -p "$LOG_DIR"
     LOG_FILE="${LOG_FILE:-$LOG_DIR/$(date +%Y%m%d_%H%M%S).log}"

@@ -1,9 +1,9 @@
 # Base config — minimal SSH-able GPU VM.
 # Override at runtime: CONFIG=configs/sglang.yml modal run --detach modal_ssh.py
 
-app_name: ssh-dev
 job_name: dev
 interactive: true
+modal_profile: zephyr271828
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 # Modal needs a known Python interpreter. For images without one (or where Modal can't detect it),
 # set add_python so Modal bundles its own. Omit if your base image already has Python that Modal recognizes.

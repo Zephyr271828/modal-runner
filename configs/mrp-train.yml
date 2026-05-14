@@ -1,8 +1,8 @@
 # Multi-token denoising dev environment.
 
-app_name: mrp-ssh
 job_name: mrp-train
 interactive: true
+modal_profile: heavyball
 
 base_image: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 add_python: "3.11"
@@ -23,6 +23,7 @@ git_repo: git@github.com:heavyball-research/multi-token-residual-prediction.git
 apt_packages:
   - openssh-server
   - git
+  - git-lfs
   - wget
   - curl
   - tmux
@@ -34,6 +35,9 @@ apt_packages:
 # requirements, and flash-attn. Each list item runs in its own shell, so we use
 # the env's absolute pip path instead of `conda activate`.
 run_commands:
+  # git-lfs: register smudge/clean filters, then pull any LFS blobs in the clone.
+  # No-op if the repo has no LFS-tracked files.
+  - git lfs install && cd /root/multi-token-residual-prediction && git lfs pull
   # Miniconda
   - wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
   - bash /tmp/miniconda.sh -b && rm /tmp/miniconda.sh
@@ -45,7 +49,7 @@ run_commands:
   # Torch (cu128)
   - /root/miniconda3/envs/llamafactory_sdar/bin/pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
   # Repo deps
-  - cd /root/multi-token-residual-prediction && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -r requirements.txt
+  - cd /root/multi-token-residual-prediction/src/training/sdar && /root/miniconda3/envs/llamafactory_sdar/bin/pip install -r requirements.txt
   # flash-attn build prerequisites (--no-build-isolation skips pip's isolated build env).
   - /root/miniconda3/envs/llamafactory_sdar/bin/pip install psutil packaging ninja wheel setuptools
   # flash-attn (needs torch present; --no-build-isolation so it sees the installed torch)
@@ -75,6 +79,9 @@ max_resumes: 5
 volumes:
   /root/.cache/huggingface: huggingface-cache
   /root/multi-token-residual-prediction/checkpoints: mrp-train-checkpoints
+  # Persisted HF datasets tokenization cache. First run populates it (~19M
+  # examples), subsequent runs skip the dataset.map step entirely.
+  /root/multi-token-residual-prediction/src/training/sdar/llama_factory_sdar/tokenized_cache: mrp-train-tokenized-cache
   /root/.runlogs: mrp-train-runlogs
 
 secrets:

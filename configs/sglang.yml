@@ -1,8 +1,8 @@
 # Example: sglang dev environment with conda + repo clone baked in.
 
-app_name: sglang-ssh
 job_name: sglang
 interactive: true
+modal_profile: zephyr271828
 base_image: lmsysorg/sglang:latest
 
 gpu:

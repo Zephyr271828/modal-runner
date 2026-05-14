@@ -17,7 +17,7 @@ if modal.is_local() and cfg.get("auto_generate_modal_key", True):
 image, REPO_DEST = _image.build()
 volumes = _volumes.build()
 
-app = modal.App(cfg["app_name"], image=image, volumes=volumes)
+app = modal.App(cfg["job_name"], image=image, volumes=volumes)
 
 # Register @app.function definitions by importing the module.
 from . import functions  # noqa: E402, F401
